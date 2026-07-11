@@ -487,6 +487,10 @@ jobs:
       - name: Install Linux system packages
         if: runner.os == 'Linux'
         run: |
+          # python3-venv: vcpkg's libsystemd port (a transitive dependency
+          # pulled in once the newer builtin-baseline landed) needs it to
+          # build from source. GitHub's hosted Ubuntu image ships it by
+          # default; this self-hosted Debian box doesn't.
           sudo apt-get update
           sudo apt-get install -y \
             autoconf \
@@ -515,7 +519,8 @@ jobs:
             libopenal-dev \
             wayland-protocols \
             ccache \
-            unzip
+            unzip \
+            python3-venv
 
       - name: Verify macOS dependencies
         if: runner.os == 'macOS'
