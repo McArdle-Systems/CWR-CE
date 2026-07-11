@@ -313,7 +313,8 @@ bool TextureMTL::LoadPixelsInterpolated(EngineMTLBootstrap& bootstrap, RStringB 
             break; // mismatched mip dims between the two sources -- stop, keep levels blended so far
         std::vector<uint8_t> out(a.rgba.size());
         for (size_t p = 0; p < out.size(); p++)
-            out[p] = static_cast<uint8_t>(a.rgba[p] + (static_cast<int>(b.rgba[p]) - static_cast<int>(a.rgba[p])) * factor);
+            out[p] =
+                static_cast<uint8_t>(a.rgba[p] + (static_cast<int>(b.rgba[p]) - static_cast<int>(a.rgba[p])) * factor);
         blended.push_back(std::move(out));
     }
     if (blended.empty())
@@ -543,7 +544,7 @@ Color TextureMTL::GetColor()
         a += rgba[i * 4 + 3];
     }
     return Color(static_cast<float>(r / pixelCount / 255.0), static_cast<float>(g / pixelCount / 255.0),
-                static_cast<float>(b / pixelCount / 255.0), static_cast<float>(a / pixelCount / 255.0));
+                 static_cast<float>(b / pixelCount / 255.0), static_cast<float>(a / pixelCount / 255.0));
 }
 
 } // namespace Poseidon

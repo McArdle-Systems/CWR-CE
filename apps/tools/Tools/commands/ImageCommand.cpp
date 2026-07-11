@@ -96,8 +96,7 @@ static void setupImageInspect(CLI::App& image)
                 f.seekg(0, std::ios::beg);
                 std::vector<char> fileData(static_cast<size_t>(fileSize));
                 f.read(fileData.data(), fileSize);
-                const bool isPaaExt = inputPath.size() >= 4 &&
-                                     (inputPath.back() == 'a' || inputPath.back() == 'A');
+                const bool isPaaExt = inputPath.size() >= 4 && (inputPath.back() == 'a' || inputPath.back() == 'A');
                 const Poseidon::DecodedImageChain chain =
                     Poseidon::DecodePAABufferAllMips(fileData.data(), fileData.size(), isPaaExt);
                 std::cout << "Mip chain (decoded): " << chain.levels.size() << " level(s)";

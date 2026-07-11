@@ -75,7 +75,8 @@ TEST_CASE("TouchPage: row labels and descriptions match stringtable", "[UI][Touc
     CHECK(std::string(p.RowLabel(0)) == "Aim sensitivity");
     CHECK(std::string(p.RowDescription(0)) == "Right-side touch look and aim sensitivity. Range 0.25x to 3.0x.");
     CHECK(std::string(p.RowLabel(1)) == "Cursor movement sensitivity");
-    CHECK(std::string(p.RowDescription(1)) == "Touch cursor movement sensitivity outside gameplay. Range 0.25x to 3.0x.");
+    CHECK(std::string(p.RowDescription(1)) ==
+          "Touch cursor movement sensitivity outside gameplay. Range 0.25x to 3.0x.");
     CHECK(std::string(p.RowLabel(2)) == "Show touch controls");
     CHECK(std::string(p.RowDescription(2)) ==
           "Auto shows touch controls when you're using touch and hides them when you switch to keyboard or a gamepad.");

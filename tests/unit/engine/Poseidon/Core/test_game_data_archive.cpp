@@ -109,8 +109,7 @@ TEST_CASE("GameDataArchive::Unpack strips a single common top-level wrapping fol
     std::filesystem::remove_all(root, ec);
 }
 
-TEST_CASE("GameDataArchive::Unpack does not strip when entries already live at the archive root",
-         "[gamedata][archive]")
+TEST_CASE("GameDataArchive::Unpack does not strip when entries already live at the archive root", "[gamedata][archive]")
 {
     const auto root = MakeTempDir();
     const auto zipPath = root / "fixture.zip";

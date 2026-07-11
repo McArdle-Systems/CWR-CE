@@ -44,7 +44,8 @@ bool IsSafeEntryName(const std::string& normalized)
     while (start <= normalized.size())
     {
         const size_t slash = normalized.find('/', start);
-        const std::string segment = normalized.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+        const std::string segment =
+            normalized.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
         if (segment == "..")
         {
             return false;

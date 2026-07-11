@@ -75,9 +75,8 @@ bool WriteGameDataManifest(const std::string& gameDataDir, const std::string& so
     cJSON_AddNumberToObject(root, "schemaVersion", 1);
     if (!sourceUrl.empty())
         cJSON_AddStringToObject(root, "sourceUrl", sourceUrl.c_str());
-    const auto unpackedAt = std::chrono::duration_cast<std::chrono::seconds>(
-                                std::chrono::system_clock::now().time_since_epoch())
-                                .count();
+    const auto unpackedAt =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     cJSON_AddNumberToObject(root, "unpackedAtUnix", static_cast<double>(unpackedAt));
     cJSON_AddNumberToObject(root, "sizeBytes", static_cast<double>(sizeBytes));
     cJSON_AddNumberToObject(root, "fileCount", static_cast<double>(fileCount));

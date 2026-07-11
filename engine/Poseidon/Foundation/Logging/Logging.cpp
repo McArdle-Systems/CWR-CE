@@ -564,8 +564,8 @@ void LoggingSystem::Initialize(const char* logLevel, const char* categoryFilter,
             // but displays ANSI escapes literally. The generated Xcode scheme
             // marks its launches explicitly; plain devicectl/terminal launches
             // retain spdlog's normal TTY-based color detection.
-            const auto colorMode = std::getenv("POSEIDON_XCODE_CONSOLE") ? spdlog::color_mode::never
-                                                                        : spdlog::color_mode::automatic;
+            const auto colorMode =
+                std::getenv("POSEIDON_XCODE_CONSOLE") ? spdlog::color_mode::never : spdlog::color_mode::automatic;
             useConsoleColor = colorMode != spdlog::color_mode::never;
             auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>(colorMode);
 #else

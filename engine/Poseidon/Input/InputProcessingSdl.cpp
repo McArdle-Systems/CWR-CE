@@ -577,13 +577,13 @@ void ProcessJoystick_SDL()
     // ---- D-pad → 8-way stickPov ----
     // 0=N 1=NE 2=E 3=SE 4=S 5=SW 6=W 7=NW
     bool dpUp = (sGamepad && SDL_GetGamepadButton(sGamepad, SDL_GAMEPAD_BUTTON_DPAD_UP) != 0) ||
-        InputSubsystem::Instance().ConsumeSyntheticStickPov(0);
+                InputSubsystem::Instance().ConsumeSyntheticStickPov(0);
     bool dpDown = (sGamepad && SDL_GetGamepadButton(sGamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN) != 0) ||
-        InputSubsystem::Instance().ConsumeSyntheticStickPov(4);
+                  InputSubsystem::Instance().ConsumeSyntheticStickPov(4);
     bool dpLeft = (sGamepad && SDL_GetGamepadButton(sGamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT) != 0) ||
-        InputSubsystem::Instance().ConsumeSyntheticStickPov(6);
+                  InputSubsystem::Instance().ConsumeSyntheticStickPov(6);
     bool dpRight = (sGamepad && SDL_GetGamepadButton(sGamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) != 0) ||
-        InputSubsystem::Instance().ConsumeSyntheticStickPov(2);
+                   InputSubsystem::Instance().ConsumeSyntheticStickPov(2);
     int pov8 = -1;
     if (dpUp && dpRight)
         pov8 = 1;

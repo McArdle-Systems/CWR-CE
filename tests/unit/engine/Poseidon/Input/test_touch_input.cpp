@@ -468,8 +468,7 @@ TEST_CASE("TouchInput: map scene two-finger gesture pans and pinches", "[input][
     CHECK_FALSE(state.mapGestureActive);
 }
 
-TEST_CASE("TouchInput: gameplay two-finger pinch on the aim side zooms and suppresses look rotation",
-         "[input][touch]")
+TEST_CASE("TouchInput: gameplay two-finger pinch on the aim side zooms and suppresses look rotation", "[input][touch]")
 {
     TouchFixture fixture;
     TouchInput_TestSetGameplaySceneOverride(true, true);

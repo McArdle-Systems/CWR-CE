@@ -136,8 +136,7 @@ TEST_CASE("CloudletSource::Load applies no-depth billboard flags to synthetic bi
 
 TEST_CASE("Metal DrawDecal keeps billboard depth test inputs", "[Graphics][Effects][Cloudlet][Metal]")
 {
-    const std::string metal =
-        ReadTextFile(RepoRoot() / "engine" / "PoseidonMTL" / "EngineMTL.cpp");
+    const std::string metal = ReadTextFile(RepoRoot() / "engine" / "PoseidonMTL" / "EngineMTL.cpp");
     REQUIRE_FALSE(metal.empty());
 
     const size_t drawDecal = metal.find("void EngineMTL::DrawDecal");

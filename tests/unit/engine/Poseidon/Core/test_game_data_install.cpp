@@ -70,7 +70,7 @@ TEST_CASE("DetectGameDataStatus is Partial when required files are present but n
 }
 
 TEST_CASE("DetectGameDataStatus is Partial when the manifest exists but a required path is missing",
-         "[gamedata][install]")
+          "[gamedata][install]")
 {
     const auto root = MakeTempDir();
     const auto dir = root / "GameData";

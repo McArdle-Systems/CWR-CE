@@ -510,10 +510,10 @@ DrawableSizeChoice ResolveDrawableSize(SDL_Window* window, int fallbackWidth, in
 
     const double scaleX = static_cast<double>(choice.width) / static_cast<double>(logicalW);
     const double scaleY = static_cast<double>(choice.height) / static_cast<double>(logicalH);
-    const int safePixelW = std::clamp(static_cast<int>(std::lround(static_cast<double>(safe.w) * scaleX)), 1,
-                                      choice.width);
-    const int safePixelH = std::clamp(static_cast<int>(std::lround(static_cast<double>(safe.h) * scaleY)), 1,
-                                      choice.height);
+    const int safePixelW =
+        std::clamp(static_cast<int>(std::lround(static_cast<double>(safe.w) * scaleX)), 1, choice.width);
+    const int safePixelH =
+        std::clamp(static_cast<int>(std::lround(static_cast<double>(safe.h) * scaleY)), 1, choice.height);
     if (safePixelW <= 0 || safePixelH <= 0)
         return choice;
 
@@ -576,8 +576,8 @@ struct EngineMTLBootstrap::Impl
     // blending so opaque/cutout sections never have blending enabled, same
     // split GL33 gets from its opaque-pass-vs-BlendOnly-pass routing (see
     // DrawSectionTL's blendEnabled parameter).
-    MTL::RenderPipelineState* pipelineStateTL = nullptr;       // fsMeshOpaque, blending disabled
-    MTL::RenderPipelineState* pipelineStateTLBlend = nullptr;  // fsMeshBlend, blending enabled
+    MTL::RenderPipelineState* pipelineStateTL = nullptr;      // fsMeshOpaque, blending disabled
+    MTL::RenderPipelineState* pipelineStateTLBlend = nullptr; // fsMeshBlend, blending enabled
     // Single-pass shadow variant for the hardware-TL path: vsMesh/fsShadow,
     // color writes ON, Shadow blend factors (Zero, OneMinusSourceAlpha) --
     // paired with depthStateShadow's stencil EQUAL 0 + INCREMENT. See
@@ -641,8 +641,8 @@ struct EngineMTLBootstrap::Impl
                    clipX == rhs.clipX && clipY == rhs.clipY && clipW == rhs.clipW && clipH == rhs.clipH &&
                    useDepth == rhs.useDepth && depthMode == rhs.depthMode && blendMode == rhs.blendMode &&
                    sampler == rhs.sampler && surface == rhs.surface && shader == rhs.shader &&
-                   alphaMode == rhs.alphaMode && alphaRef == rhs.alphaRef &&
-                   fogColor[0] == rhs.fogColor[0] && fogColor[1] == rhs.fogColor[1] && fogColor[2] == rhs.fogColor[2];
+                   alphaMode == rhs.alphaMode && alphaRef == rhs.alphaRef && fogColor[0] == rhs.fogColor[0] &&
+                   fogColor[1] == rhs.fogColor[1] && fogColor[2] == rhs.fogColor[2];
         }
         bool operator!=(const Triangles2DState& rhs) const { return !(*this == rhs); }
     };
@@ -1437,9 +1437,8 @@ void EngineMTLBootstrap::FlushTriangles2D()
     // Shadow polys use the single-pass stencil-exclusion scheme as the TL
     // path. Non-shadow flat UI keeps depth disabled; legacy software-TL
     // callers opt into the descriptor depth state through useDepth.
-    const bool isShadow =
-        state.blendMode == Poseidon::render::BlendMode::Shadow ||
-        state.depthMode == Poseidon::render::DepthMode::Shadow;
+    const bool isShadow = state.blendMode == Poseidon::render::BlendMode::Shadow ||
+                          state.depthMode == Poseidon::render::DepthMode::Shadow;
     MTL::RenderPipelineState* pipeline = _impl->pipelineState;
     if (isShadow)
         pipeline = _impl->pipelineState2DShadow;
@@ -1515,7 +1514,8 @@ void EngineMTLBootstrap::FlushTriangles2D()
 
     const size_t vertexBytes = _impl->queued2DVertices.size() * sizeof(Vertex2DMTL);
     const size_t indexBytes = _impl->queued2DIndices.size() * sizeof(uint16_t);
-    if (_impl->queued2DVertexBuffer == nullptr || _impl->queued2DVertexBufferUsed + vertexBytes > _impl->queued2DVertexBufferBytes)
+    if (_impl->queued2DVertexBuffer == nullptr ||
+        _impl->queued2DVertexBufferUsed + vertexBytes > _impl->queued2DVertexBufferBytes)
     {
         if (_impl->queued2DVertexBuffer != nullptr)
             _impl->pending2DBufferRelease[_impl->destroyGeneration].push_back(_impl->queued2DVertexBuffer);
@@ -1528,7 +1528,8 @@ void EngineMTLBootstrap::FlushTriangles2D()
         _impl->queued2DVertexBufferBytes = newBytes;
         _impl->queued2DVertexBufferUsed = 0;
     }
-    if (_impl->queued2DIndexBuffer == nullptr || _impl->queued2DIndexBufferUsed + indexBytes > _impl->queued2DIndexBufferBytes)
+    if (_impl->queued2DIndexBuffer == nullptr ||
+        _impl->queued2DIndexBufferUsed + indexBytes > _impl->queued2DIndexBufferBytes)
     {
         if (_impl->queued2DIndexBuffer != nullptr)
             _impl->pending2DBufferRelease[_impl->destroyGeneration].push_back(_impl->queued2DIndexBuffer);
@@ -1560,10 +1561,9 @@ void EngineMTLBootstrap::FlushTriangles2D()
     _impl->currentEncoder->setVertexBuffer(_impl->queued2DVertexBuffer, static_cast<NS::UInteger>(vertexOffset), 0);
     _impl->currentEncoder->setFragmentTexture(tex, 0);
     _impl->currentEncoder->setFragmentTexture(secondaryTex, 1);
-    _impl->currentEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle,
-                                                 static_cast<NS::UInteger>(_impl->queued2DIndices.size()),
-                                                 MTL::IndexTypeUInt16, _impl->queued2DIndexBuffer,
-                                                 static_cast<NS::UInteger>(indexOffset));
+    _impl->currentEncoder->drawIndexedPrimitives(
+        MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(_impl->queued2DIndices.size()), MTL::IndexTypeUInt16,
+        _impl->queued2DIndexBuffer, static_cast<NS::UInteger>(indexOffset));
 
     _impl->queued2DActive = false;
     _impl->queued2DVertices.clear();
@@ -1571,17 +1571,14 @@ void EngineMTLBootstrap::FlushTriangles2D()
 }
 
 void EngineMTLBootstrap::DrawTriangles2D(const Vertex2DMTL* verts, int vertCount, const uint16_t* indices,
-                                         int indexCount, int textureHandle, int secondaryTextureHandle,
-                                         int clipX, int clipY, int clipW, int clipH,
-                                         bool useDepth,
+                                         int indexCount, int textureHandle, int secondaryTextureHandle, int clipX,
+                                         int clipY, int clipW, int clipH, bool useDepth,
                                          Poseidon::render::DepthMode depthMode, Poseidon::render::BlendMode blendMode,
                                          Poseidon::render::SamplerMode sampler, Poseidon::render::SurfaceMode surface,
-                                         Poseidon::render::ShaderFamily shader,
-                                         Poseidon::render::AlphaMode alphaMode, std::uint8_t alphaRef,
-                                         const float fogColor[3])
+                                         Poseidon::render::ShaderFamily shader, Poseidon::render::AlphaMode alphaMode,
+                                         std::uint8_t alphaRef, const float fogColor[3])
 {
-    if (_impl->currentEncoder == nullptr || vertCount <= 0 || indexCount <= 0 || verts == nullptr ||
-        indices == nullptr)
+    if (_impl->currentEncoder == nullptr || vertCount <= 0 || indexCount <= 0 || verts == nullptr || indices == nullptr)
         return;
 
     Impl::Triangles2DState state;
@@ -1690,8 +1687,8 @@ int EngineMTLBootstrap::CreateMeshBuffer(const void* data, size_t byteSize, bool
     if (_impl->device == nullptr || data == nullptr || byteSize == 0)
         return 0;
 
-    MTL::Buffer* buf = _impl->device->newBuffer(data, static_cast<NS::UInteger>(byteSize),
-                                                MTL::ResourceStorageModeShared);
+    MTL::Buffer* buf =
+        _impl->device->newBuffer(data, static_cast<NS::UInteger>(byteSize), MTL::ResourceStorageModeShared);
     if (buf == nullptr)
         return 0;
     (void)dynamic; // storage mode is the same either way; kept for caller-side bookkeeping only
@@ -1736,10 +1733,10 @@ void EngineMTLBootstrap::DestroyMeshBufferDeferred(int handle)
 }
 
 void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHandle, int firstIndex, int indexCount,
-                                       int textureHandle, int secondaryTextureHandle, const ObjectConstantsMTL& obj, const FrameConstantsMTL& frame,
-                                       Poseidon::render::DepthMode depthMode, Poseidon::render::BlendMode blendMode,
-                                       Poseidon::render::SamplerMode sampler, Poseidon::render::SurfaceMode surface,
-                                       Poseidon::render::ShaderFamily shader)
+                                       int textureHandle, int secondaryTextureHandle, const ObjectConstantsMTL& obj,
+                                       const FrameConstantsMTL& frame, Poseidon::render::DepthMode depthMode,
+                                       Poseidon::render::BlendMode blendMode, Poseidon::render::SamplerMode sampler,
+                                       Poseidon::render::SurfaceMode surface, Poseidon::render::ShaderFamily shader)
 {
     if (_impl->currentEncoder == nullptr || indexCount <= 0)
         return;
@@ -1748,8 +1745,7 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
 
     EnsureTLPipeline();
     if (_impl->pipelineStateTL == nullptr || _impl->pipelineStateTLBlend == nullptr ||
-        _impl->pipelineStateTLAdditive == nullptr ||
-        _impl->pipelineStateTLShadow == nullptr)
+        _impl->pipelineStateTLAdditive == nullptr || _impl->pipelineStateTLShadow == nullptr)
         return;
 
     if (vertexBufferHandle <= 0 || static_cast<size_t>(vertexBufferHandle) > _impl->meshBuffers.size())
@@ -1852,9 +1848,8 @@ int EngineMTLBootstrap::CreateTexture(int width, int height, const uint8_t* rgba
     if (_impl->device == nullptr || width <= 0 || height <= 0 || rgba == nullptr)
         return 0;
 
-    MTL::TextureDescriptor* desc =
-        MTL::TextureDescriptor::texture2DDescriptor(MTL::PixelFormatRGBA8Unorm, static_cast<NS::UInteger>(width),
-                                                    static_cast<NS::UInteger>(height), false);
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::texture2DDescriptor(
+        MTL::PixelFormatRGBA8Unorm, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height), false);
     desc->setUsage(MTL::TextureUsageShaderRead);
     desc->setStorageMode(MTL::StorageModeShared);
 
@@ -1884,7 +1879,7 @@ void UploadMipLevels(MTL::Texture* tex, const EngineMTLBootstrap::MipLevel* leve
         if (levels[i].rgba == nullptr || levels[i].width <= 0 || levels[i].height <= 0)
             break;
         MTL::Region levelRegion = MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(levels[i].width),
-                                                       static_cast<NS::UInteger>(levels[i].height));
+                                                      static_cast<NS::UInteger>(levels[i].height));
         tex->replaceRegion(levelRegion, static_cast<NS::UInteger>(i), levels[i].rgba,
                            static_cast<NS::UInteger>(levels[i].width) * 4);
     }

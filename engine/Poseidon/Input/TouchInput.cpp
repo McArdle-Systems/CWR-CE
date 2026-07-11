@@ -538,8 +538,8 @@ void EmitCommandMenuSelectTap(const Finger& finger)
 
 void PlaceZigZagButtonBar(std::array<ButtonZone, (int)TouchButton::Count>& zones, const TouchButton* buttons,
                           int buttonCount, TouchBarSide side, const PixelLayout& layout, int width, int height,
-                          float startY, float stepY, float radius, int* sideCluster, int& sideCount,
-                          int* lowerCluster, int& lowerCount)
+                          float startY, float stepY, float radius, int* sideCluster, int& sideCount, int* lowerCluster,
+                          int& lowerCount)
 {
     const float outerX = side == TouchBarSide::Left ? layout.edgeMargin : (float)width - layout.edgeMargin;
     const float innerX =
@@ -576,16 +576,15 @@ std::array<ButtonZone, (int)TouchButton::Count> BuildButtonZones(int width, int 
     int lowerCluster[(int)TouchButton::Count] = {};
     int leftCount = 0;
     int lowerCount = 0;
-    PlaceZigZagButtonBar(zones, leftActionButtons,
-                         (int)(sizeof(leftActionButtons) / sizeof(leftActionButtons[0])), TouchBarSide::Left,
-                         layout, width, height, fireY, actionStepY, radius, leftCluster, leftCount, lowerCluster,
-                         lowerCount);
-    zones[(int)TouchButton::Equipment] =
-        {TouchButton::Equipment, NormX(oppositeX, width), NormY(equipmentY, height), radius * 0.86f};
-    zones[(int)TouchButton::PersonView] =
-        {TouchButton::PersonView, NormX(oppositeX, width), NormY(layout.topMargin, height), radius * 0.72f};
-    zones[(int)TouchButton::Pause] =
-        {TouchButton::Pause, NormX(layout.edgeMargin, width), NormY(layout.topMargin, height), radius * 0.72f};
+    PlaceZigZagButtonBar(zones, leftActionButtons, (int)(sizeof(leftActionButtons) / sizeof(leftActionButtons[0])),
+                         TouchBarSide::Left, layout, width, height, fireY, actionStepY, radius, leftCluster, leftCount,
+                         lowerCluster, lowerCount);
+    zones[(int)TouchButton::Equipment] = {TouchButton::Equipment, NormX(oppositeX, width), NormY(equipmentY, height),
+                                          radius * 0.86f};
+    zones[(int)TouchButton::PersonView] = {TouchButton::PersonView, NormX(oppositeX, width),
+                                           NormY(layout.topMargin, height), radius * 0.72f};
+    zones[(int)TouchButton::Pause] = {TouchButton::Pause, NormX(layout.edgeMargin, width),
+                                      NormY(layout.topMargin, height), radius * 0.72f};
     leftCluster[leftCount++] = (int)TouchButton::Pause;
     const int rightCluster[] = {(int)TouchButton::PersonView, (int)TouchButton::Equipment};
     const int upperCluster[] = {(int)TouchButton::Pause, (int)TouchButton::PersonView, (int)TouchButton::Equipment};
@@ -636,7 +635,8 @@ void CyclePlayerWeapon()
 int BuildAvailableEquipment(EquipmentItem* items, int maxItems)
 {
     int count = 0;
-    auto add = [&](EquipmentItem item) {
+    auto add = [&](EquipmentItem item)
+    {
         if (count < maxItems)
             items[count++] = item;
     };
@@ -1089,8 +1089,7 @@ void ProcessAimPinchGesture()
     {
         if (sAimZoomOutHeld)
         {
-            SDLInput_BufferKeyEvent(SDL_SCANCODE_KP_MINUS, false,
-                                    std::max<DWORD>(1, Foundation::GlobalTickCount()));
+            SDLInput_BufferKeyEvent(SDL_SCANCODE_KP_MINUS, false, std::max<DWORD>(1, Foundation::GlobalTickCount()));
             sAimZoomOutHeld = false;
         }
         SDLInput_BufferKeyEvent(SDL_SCANCODE_KP_PLUS, true, std::max<DWORD>(1, Foundation::GlobalTickCount()));
@@ -1100,14 +1099,12 @@ void ProcessAimPinchGesture()
     {
         if (sAimZoomInHeld)
         {
-            SDLInput_BufferKeyEvent(SDL_SCANCODE_KP_PLUS, false,
-                                    std::max<DWORD>(1, Foundation::GlobalTickCount()));
+            SDLInput_BufferKeyEvent(SDL_SCANCODE_KP_PLUS, false, std::max<DWORD>(1, Foundation::GlobalTickCount()));
             sAimZoomInHeld = false;
         }
         if (!sAimZoomOutHeld)
         {
-            SDLInput_BufferKeyEvent(SDL_SCANCODE_KP_MINUS, true,
-                                    std::max<DWORD>(1, Foundation::GlobalTickCount()));
+            SDLInput_BufferKeyEvent(SDL_SCANCODE_KP_MINUS, true, std::max<DWORD>(1, Foundation::GlobalTickCount()));
             sAimZoomOutHeld = true;
         }
     }
@@ -1280,8 +1277,8 @@ void EmitButtonEdge(TouchButton button, bool down)
             break;
         case TouchButton::Pause:
             if (down)
-                SDLInput_BufferControllerUiAction(IsGameplayScene() ? ControllerUiAction::Pause : ControllerUiAction::Cancel,
-                                                  true);
+                SDLInput_BufferControllerUiAction(
+                    IsGameplayScene() ? ControllerUiAction::Pause : ControllerUiAction::Cancel, true);
             if (!IsGameplayScene())
                 SDLInput_BufferKeyEvent(SDL_SCANCODE_ESCAPE, down, Foundation::GlobalTickCount());
             break;
@@ -1390,9 +1387,9 @@ void DrawRectNorm(Engine* engine, const MipInfo& white, float cx, float cy, floa
 {
     const int sw = engine->Width();
     const int sh = engine->Height();
-    engine->Draw2D(white, color,
-                   Rect2DAbs((cx - w * 0.5f) * sw, (cy - h * 0.5f) * sh, std::max(1.0f, w * sw),
-                             std::max(1.0f, h * sh)));
+    engine->Draw2D(
+        white, color,
+        Rect2DAbs((cx - w * 0.5f) * sw, (cy - h * 0.5f) * sh, std::max(1.0f, w * sw), std::max(1.0f, h * sh)));
 }
 
 void DrawLineNorm(Engine* engine, float x0, float y0, float x1, float y1, PackedColor color)
@@ -1624,8 +1621,8 @@ void TouchInput_HandleFingerEvent(const SDL_TouchFingerEvent& event)
         if (finger->role == FingerRole::Button && finger->button == TouchButton::Action &&
             sActionScrollFingerId == finger->id)
             ResetActionScroll();
-        if (finger->role == FingerRole::Button && finger->button == TouchButton::Equipment &&
-            sEquipmentRadialActive && sEquipmentFingerId == finger->id)
+        if (finger->role == FingerRole::Button && finger->button == TouchButton::Equipment && sEquipmentRadialActive &&
+            sEquipmentFingerId == finger->id)
             sEquipmentHover = HitEquipmentItem(finger->x, finger->y);
         EmitFingerButtonEdge(*finger, false);
         ReleaseDirectTouchFinger(*finger);
@@ -1648,8 +1645,8 @@ void TouchInput_HandleFingerEvent(const SDL_TouchFingerEvent& event)
     if (event.type == SDL_EVENT_FINGER_MOTION)
     {
         ProcessActionButtonDrag(*finger, finger->y - finger->lastY);
-        if (finger->role == FingerRole::Button && finger->button == TouchButton::Equipment &&
-            sEquipmentRadialActive && sEquipmentFingerId == finger->id)
+        if (finger->role == FingerRole::Button && finger->button == TouchButton::Equipment && sEquipmentRadialActive &&
+            sEquipmentFingerId == finger->id)
             sEquipmentHover = HitEquipmentItem(finger->x, finger->y);
     }
     if (event.type == SDL_EVENT_FINGER_DOWN)
