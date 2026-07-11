@@ -36,7 +36,12 @@ jobs:
       CWR_PRESET: linux-x64-clang-rwdi
       CWR_VCPKG_TRIPLET: x64-linux-clang
       CWR_BUILD_DIR: build/linux-x64-clang-rwdi
-      CWR_CTEST_EXCLUDE: 'PoseidonTests - OAL -'
+      # STRINGTABLE_MAP/EQUIPMENT/equipment.utf8.html cases need real
+      # localization assets from packages/Combined/, which is gitignored and
+      # not present on this hosted runner (see the [external-data] note on
+      # build-cwr-arm64's matrix below, which excludes the same tests for
+      # the same reason on its own hosted/non-real-data legs).
+      CWR_CTEST_EXCLUDE: 'PoseidonTests - (OAL -|STRINGTABLE_MAP\.utf8\.csv ships both legend keys with English fallbacks|STRINGTABLE_EQUIPMENT\.utf8\.csv ships M16 keys for all 8 languages|equipment\.utf8\.html lives loose and references STR_EQ_M16 tokens|equipment\.utf8\.html line endings are clean CRLF \(no doubled CR\)|equipment\.utf8\.html preserves every EQ_ anchor and weapon image)'
       CWR_DIST_DIR: dist/x64-linux-rwdi
       CWR_ARTIFACT_PREFIX: Linux-x64-rwdi
 
@@ -85,7 +90,9 @@ jobs:
       CWR_PRESET: win-x64-clang-rwdi
       CWR_VCPKG_TRIPLET: x64-windows-clang
       CWR_BUILD_DIR: build/win-x64-clang-rwdi
-      CWR_CTEST_EXCLUDE: 'PoseidonTests - (OAL -|PAAEncoder -|Image - Save to \.paa|World state file format --|PreviewImage - saveToFile writes|PreviewImageRGB - saveToFile writes)'
+      # See build-linux's CWR_CTEST_EXCLUDE comment re: STRINGTABLE_MAP/
+      # EQUIPMENT/equipment.utf8.html needing real data not present here.
+      CWR_CTEST_EXCLUDE: 'PoseidonTests - (OAL -|PAAEncoder -|Image - Save to \.paa|World state file format --|PreviewImage - saveToFile writes|PreviewImageRGB - saveToFile writes|STRINGTABLE_MAP\.utf8\.csv ships both legend keys with English fallbacks|STRINGTABLE_EQUIPMENT\.utf8\.csv ships M16 keys for all 8 languages|equipment\.utf8\.html lives loose and references STR_EQ_M16 tokens|equipment\.utf8\.html line endings are clean CRLF \(no doubled CR\)|equipment\.utf8\.html preserves every EQ_ anchor and weapon image)'
       CWR_DIST_DIR: dist/x64-win-rwdi
       CWR_ARTIFACT_PREFIX: Windows-x64-rwdi
 
@@ -397,9 +404,10 @@ jobs:
           # gitignored and not distributed to the GitHub-hosted runners by
           # design. The self-hosted macOS runner has the real data staged
           # outside the checkout path (see "Stage Combined test data" below)
-          # and runs these for real; Linux/Windows/hosted-macOS exclude them
-          # by name, same as each other.
-          - name: Linux RelWithDebInfo
+          # and runs these for real; Linux/hosted-macOS exclude them by name,
+          # same as build-windows below (Windows isn't in this matrix -- see
+          # that job for why).
+          - name: Linux (self-hosted) RelWithDebInfo
             os: [self-hosted, debian-13, x64]
             preset: linux-x64-clang-rwdi
             vcpkg_triplet: x64-linux-clang
@@ -449,13 +457,11 @@ jobs:
             build_target: PoseidonGame
             xcode: true
             skip_tests: true
-          - name: Windows RelWithDebInfo
-            os: windows-2022
-            preset: win-x64-clang-rwdi
-            vcpkg_triplet: x64-windows-clang
-            build_dir: build/win-x64-clang-rwdi
-            build_target: ''
-            ctest_exclude: 'PoseidonTests - (OAL -|PAAEncoder -|Image - Save to \.paa|World state file format --|PreviewImage - saveToFile writes|PreviewImageRGB - saveToFile writes|STRINGTABLE_MAP\.utf8\.csv ships both legend keys with English fallbacks|STRINGTABLE_EQUIPMENT\.utf8\.csv ships M16 keys for all 8 languages|equipment\.utf8\.html lives loose and references STR_EQ_M16 tokens|equipment\.utf8\.html line endings are clean CRLF \(no doubled CR\)|equipment\.utf8\.html preserves every EQ_ anchor and weapon image)'
+          # Windows is deliberately not in this matrix: build-windows above
+          # already covers it on the same GitHub-hosted windows-2022 image,
+          # and there's no self-hosted Windows runner to justify a second,
+          # duplicate leg here (unlike Linux, where the self-hosted entry
+          # above is a real second runner, not a duplicate of build-linux).
 
     steps:
       - name: Checkout
