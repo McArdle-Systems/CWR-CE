@@ -77,7 +77,7 @@ jobs:
           VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/cmake/vcpkg-triplets
         with:
           vcpkgDirectory: ${{ runner.tool_cache }}/vcpkg
-          vcpkgGitCommitId: 15cd15b0da3c48a0c7720e4c87e0b6030334feed
+          vcpkgGitCommitId: fa9a5b330aed997a68310ed56418617b87a3b83d
           runVcpkgInstall: true
           vcpkgJsonGlob: 'vcpkg.json'
 
