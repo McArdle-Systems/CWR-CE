@@ -150,7 +150,350 @@ jobs:
             ${{ env.CWR_DIST_DIR }}/PoseidonServer.pdb
           if-no-files-found: error
 
-  trident:
+  trident-windows:
+    name: Rust / Trident / windows-2022
+    runs-on: windows-2022
+    env:
+      CWR_ARTIFACT_PREFIX: Windows-x64-rwdi
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check clippy
+        run: cargo clippy --locked --workspace --all-targets
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build metadata
+        id: build_metadata
+        shell: bash
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Trident
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Trident-${{ steps.build_metadata.outputs.sha_short }}
+          path: target/debug/tri.exe
+          if-no-files-found: error
+
+      - name: Upload MasterService
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-MasterService-${{ steps.build_metadata.outputs.sha_short }}
+          path: target/debug/papa-bear-master-service.exe
+          if-no-files-found: error
+
+  trident-test-windows:
+    name: Windows Trident
+    runs-on: windows-2022
+    needs:
+      - build-windows
+      - trident-windows
+    env:
+      CWR_ARTIFACT_PREFIX: Windows-x64-rwdi
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download demo game data
+        uses: ./.github/actions/download-extract
+        with:
+          url: ${{ env.DEMO_ASSETS_URL }}
+          path: packages/Demo
+          archive-name: CWR-demo-assets.zip
+
+      - name: Build metadata
+        id: build_metadata
+        shell: bash
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Download Game
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Game-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Download GameDemo
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-GameDemo-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Download Server
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Server-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Download Trident
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Trident-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Download MasterService
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-MasterService-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Write Trident env
+        shell: pwsh
+        run: |
+          Copy-Item .trident.env.example .trident.env
+          (Get-Content .trident.env) `
+            -replace '^OFPR_GAME_DIR=.*', 'OFPR_GAME_DIR=exe' `
+            -replace '^OFPR_DATA_DIR=.*', 'OFPR_DATA_DIR=packages/Demo' |
+            Set-Content .trident.env
+
+      - name: Run Trident tests
+        shell: pwsh
+        env:
+          ALSOFT_DRIVERS: 'null'
+          HARNESS_CMD_TIMEOUT_SEC: '180'
+          PAPA_BEAR_MASTER_SERVICE: ${{ github.workspace }}\exe\papa-bear-master-service.exe
+          TRI_OUTPUT_DIR: ${{ github.workspace }}\trident-output
+        run: |
+          exe/tri.exe test `
+            --output-dir "$env:TRI_OUTPUT_DIR" `
+            --render "$env:TRIDENT_RENDER" `
+            --retries 2 `
+            --skip-tag ci-host-blocked `
+            --game-arg --audio `
+            --game-arg "$env:TRIDENT_AUDIO" `
+            --game-arg --no-strict `
+            tests/integration
+
+      - name: Upload Trident output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trident-output-windows-${{ steps.build_metadata.outputs.sha_short }}
+          path: trident-output
+          if-no-files-found: ignore
+
+  build-macos:
+    name: macOS RelWithDebInfo
+    runs-on: macos-latest
+    env:
+      CWR_PRESET: macos-arm64-clang-rwdi
+      CWR_VCPKG_TRIPLET: arm64-osx
+      CWR_BUILD_DIR: build/macos-arm64-clang-rwdi
+      CWR_CTEST_EXCLUDE: 'PoseidonTests - (STRINGTABLE_MAP\.utf8\.csv ships both legend keys with English fallbacks|STRINGTABLE_EQUIPMENT\.utf8\.csv ships M16 keys for all 8 languages|equipment\.utf8\.html lives loose and references STR_EQ_M16 tokens|equipment\.utf8\.html line endings are clean CRLF \(no doubled CR\)|equipment\.utf8\.html preserves every EQ_ anchor and weapon image)|PoseidonFoundationTests - potime - (Poseidon - Foundation - getSystemTime timing accuracy|Common usage patterns|Platform consistency|SLEEP_MS macro)'
+      CWR_DIST_DIR: dist/macos-arm64-clang-rwdi
+      CWR_ARTIFACT_PREFIX: macOS-arm64-rwdi
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install macOS dependencies
+        run: brew install clang-format
+
+      - name: Verify macOS dependencies
+        run: |
+          command -v clang-format
+          command -v pkg-config
+          command -v xcodebuild
+
+      - name: Build metadata
+        id: build_metadata
+        shell: bash
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test
+        uses: ./.github/actions/build-cwr
+        with:
+          preset: ${{ env.CWR_PRESET }}
+          vcpkg-triplet: ${{ env.CWR_VCPKG_TRIPLET }}
+          build-dir: ${{ env.CWR_BUILD_DIR }}
+          ctest-exclude: ${{ env.CWR_CTEST_EXCLUDE }}
+
+      - name: Upload Game
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Game-${{ steps.build_metadata.outputs.sha_short }}
+          path: |
+            ${{ env.CWR_DIST_DIR }}/PoseidonGame
+            ${{ env.CWR_DIST_DIR }}/libopenal.dylib
+          if-no-files-found: error
+
+      - name: Upload GameDemo
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-GameDemo-${{ steps.build_metadata.outputs.sha_short }}
+          path: |
+            ${{ env.CWR_DIST_DIR }}/PoseidonGameDemo
+            ${{ env.CWR_DIST_DIR }}/libopenal.dylib
+          if-no-files-found: error
+
+      - name: Upload Server
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Server-${{ steps.build_metadata.outputs.sha_short }}
+          path: ${{ env.CWR_DIST_DIR }}/PoseidonServer
+          if-no-files-found: error
+
+  trident-macos:
+    name: Rust / Trident / macos-latest
+    runs-on: macos-latest
+    env:
+      CWR_ARTIFACT_PREFIX: macOS-arm64-rwdi
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check clippy
+        run: cargo clippy --locked --workspace --all-targets
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build metadata
+        id: build_metadata
+        shell: bash
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Trident
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Trident-${{ steps.build_metadata.outputs.sha_short }}
+          path: target/debug/tri
+          if-no-files-found: error
+
+      - name: Upload MasterService
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-MasterService-${{ steps.build_metadata.outputs.sha_short }}
+          path: target/debug/papa-bear-master-service
+          if-no-files-found: error
+
+  trident-test-macos:
+    name: macOS Trident
+    runs-on: macos-latest
+    needs:
+      - build-macos
+      - trident-macos
+    env:
+      CWR_ARTIFACT_PREFIX: macOS-arm64-rwdi
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download demo game data
+        uses: ./.github/actions/download-extract
+        with:
+          url: ${{ env.DEMO_ASSETS_URL }}
+          path: packages/Demo
+          archive-name: CWR-demo-assets.zip
+
+      - name: Build metadata
+        id: build_metadata
+        shell: bash
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Download Game
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Game-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Download GameDemo
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-GameDemo-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Download Server
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Server-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Download Trident
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-Trident-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Download MasterService
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CWR_ARTIFACT_PREFIX }}-MasterService-${{ steps.build_metadata.outputs.sha_short }}
+          path: exe
+
+      - name: Write Trident env
+        run: |
+          chmod +x exe/*
+          cp .trident.env.example .trident.env
+          sed -i '' 's|^OFPR_GAME_DIR=.*|OFPR_GAME_DIR=exe|' .trident.env
+          sed -i '' 's|^OFPR_DATA_DIR=.*|OFPR_DATA_DIR=packages/Demo|' .trident.env
+
+      - name: Run Trident tests
+        env:
+          ALSOFT_DRIVERS: 'null'
+          HARNESS_CMD_TIMEOUT_SEC: '180'
+          PAPA_BEAR_MASTER_SERVICE: ${{ github.workspace }}/exe/papa-bear-master-service
+          TRI_OUTPUT_DIR: ${{ github.workspace }}/trident-output
+        run: |
+          exe/tri test \
+            --output-dir "$TRI_OUTPUT_DIR" \
+            --render "$TRIDENT_RENDER" \
+            --retries 2 \
+            --skip-tag ci-host-blocked \
+            --game-arg --audio \
+            --game-arg "$TRIDENT_AUDIO" \
+            --game-arg --no-strict \
+            tests/integration
+
+      - name: Upload Trident output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trident-output-macos-${{ steps.build_metadata.outputs.sha_short }}
+          path: trident-output
+          if-no-files-found: ignore
+
+  trident-linux:
     name: Rust / Trident / ubuntu-24.04
     runs-on: ubuntu-24.04
 
@@ -200,12 +543,12 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-  trident-test:
+  trident-test-linux:
     name: Linux Trident
     runs-on: ubuntu-24.04
     needs:
       - build-linux
-      - trident
+      - trident-linux
 
     steps:
       - name: Checkout
@@ -390,16 +733,14 @@ jobs:
     # run's still-queued job from an entirely unrelated PR/branch/push (only
     # one pending job per concurrency group is ever kept, even with
     # cancel-in-progress: false -- that only protects an already-*running*
-    # job, not one still waiting for the runner). Checking for 'self-hosted'
-    # in addition to 'macOS' keeps the GitHub-hosted macOS leg out of this
-    # queue -- it runs on its own hosted VM, not the shared physical Mac.
+    # job, not one still waiting for the runner).
     concurrency:
       group: ${{ (contains(matrix.os, 'self-hosted') && contains(matrix.os, 'macOS')) && format('cwr-arm64-self-hosted-macos-{0}', github.run_id) || format('cwr-arm64-{0}-{1}', github.run_id, matrix.name) }}
       cancel-in-progress: false
 
     # The self-hosted macOS leg is a supplementary, real-data-backed check --
-    # its result doesn't gate the workflow. The GitHub-hosted macOS leg below
-    # is the fast, always-available required signal for macOS.
+    # its result doesn't gate the workflow. The build-macos job above is the
+    # fast, always-available required signal for macOS.
     continue-on-error: ${{ matrix.optional == true }}
 
     strategy:
@@ -412,9 +753,7 @@ jobs:
           # gitignored and not distributed to the GitHub-hosted runners by
           # design. The self-hosted macOS runner has the real data staged
           # outside the checkout path (see "Stage Combined test data" below)
-          # and runs these for real; Linux/hosted-macOS exclude them by name,
-          # same as build-windows below (Windows isn't in this matrix -- see
-          # that job for why).
+          # and runs these for real; the dedicated hosted jobs exclude them.
           - name: Linux (self-hosted) RelWithDebInfo
             os: [self-hosted, debian-13, x64]
             preset: linux-x64-clang-rwdi
@@ -422,29 +761,6 @@ jobs:
             build_dir: build/linux-x64-clang-rwdi
             build_target: ''
             ctest_exclude: 'PoseidonTests - (STRINGTABLE_MAP\.utf8\.csv ships both legend keys with English fallbacks|STRINGTABLE_EQUIPMENT\.utf8\.csv ships M16 keys for all 8 languages|equipment\.utf8\.html lives loose and references STR_EQ_M16 tokens|equipment\.utf8\.html line endings are clean CRLF \(no doubled CR\)|equipment\.utf8\.html preserves every EQ_ anchor and weapon image)'
-          # Fast, always-available required check -- runs on GitHub's hosted
-          # infrastructure so it never queues behind the single physical
-          # self-hosted Mac. Same real-data exclusions as Linux; no ccache
-          # (hosted runners are ephemeral, nothing to persist a cache dir on
-          # between runs without extra setup) and no renderer smoke test
-          # (hosted macOS VMs aren't guaranteed real GPU/Metal access).
-          #
-          # Also excludes 4 test_potime.cpp cases that assert tight sleep/
-          # interval budgets (e.g. a 50ms sleep completing within 50ms) --
-          # confirmed flaky specifically on this hosted VM class (observed
-          # 89-143ms against 50-100ms budgets on a real run; SLEEP_MS macro
-          # separately observed at 90ms against its 50ms budget), consistent
-          # with GitHub's hosted macOS runners having looser scheduling
-          # guarantees than the dedicated self-hosted Mac. Not excluded on
-          # Linux/Windows/self-hosted, which don't show this jitter.
-          - name: macOS (Apple Silicon) RelWithDebInfo
-            os: macos-latest
-            preset: macos-arm64-clang-rwdi
-            vcpkg_triplet: arm64-osx
-            build_dir: build/macos-arm64-clang-rwdi
-            build_target: ''
-            skip_smoke: true
-            ctest_exclude: 'PoseidonTests - (STRINGTABLE_MAP\.utf8\.csv ships both legend keys with English fallbacks|STRINGTABLE_EQUIPMENT\.utf8\.csv ships M16 keys for all 8 languages|equipment\.utf8\.html lives loose and references STR_EQ_M16 tokens|equipment\.utf8\.html line endings are clean CRLF \(no doubled CR\)|equipment\.utf8\.html preserves every EQ_ anchor and weapon image)|PoseidonFoundationTests - potime - (Poseidon - Foundation - getSystemTime timing accuracy|Common usage patterns|Platform consistency|SLEEP_MS macro)'
           # Supplementary check against the real (non-excluded) Combined data
           # and a real GPU/Metal smoke test, on the single physical
           # self-hosted Mac -- optional (continue-on-error above) so it never
@@ -494,18 +810,12 @@ jobs:
       # (git clean -ffdx removes ignored files too) at the start of every
       # run, so the real data lives outside the checkout at
       # /Users/jarvis/ci-data/Combined and gets relinked in here each time.
-      # Self-hosted only -- that path doesn't exist on the hosted macOS
-      # runner, which instead excludes the [external-data] tests by name
-      # (matrix.ctest_exclude), same as Linux/Windows.
+      # This path only exists on the self-hosted macOS runner.
       - name: Stage Combined test data
         if: runner.os == 'macOS' && runner.environment == 'self-hosted'
         run: |
           mkdir -p packages
           ln -sfn /Users/jarvis/ci-data/Combined packages/Combined
-
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS' && runner.environment != 'self-hosted'
-        run: brew install ccache clang-format
 
       - name: Install Linux system packages
         if: runner.os == 'Linux'
@@ -558,66 +868,6 @@ jobs:
           command -v pkg-config
           command -v xcodebuild
 
-      # Moved ahead of the ccache/vcpkg cache-setup steps below since both
-      # now key off this on hosted macOS, where Xcode/clang comes from
-      # whatever the macos-latest image currently ships and can drift
-      # between runs (self-hosted pins to whatever's on the physical Mac,
-      # so it doesn't need this until it changes there directly).
-      - name: Get macOS toolchain version
-        id: macos_toolchain
-        if: runner.os == 'macOS'
-        run: echo "version=$(xcrun clang --version | head -n 1)" >> "$GITHUB_OUTPUT"
-
-      - name: Setup MSVC developer environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Setup LLVM and Clang
-        if: runner.os == 'Windows'
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: '19'
-          arch: 'x64'
-          directory: 'C:\Program Files\LLVM'
-
-      # Windows (and hosted macOS below) are hosted/ephemeral, so unlike the
-      # self-hosted runners there's no local disk to persist a ccache dir on
-      # between runs -- this wraps ccache's directory in actions/cache
-      # instead (restore before the build, save after). This repo used to
-      # run this same action unconditionally on all hosted runners and
-      # dropped it in 43d1d43 without a documented reason; validated on
-      # Windows alone first (see below) before extending to hosted macOS.
-      #
-      # max-size started at 300M (matching this repo's very first ccache
-      # attempt) but that filled to 98.87% on the first run alone -- only a
-      # 40% hit rate on the very next run since ccache was evicting its own
-      # entries mid-build. Matching self-hosted's 1G instead, since that's
-      # the value this repo already converged on once for the same codebase.
-      - name: Setup compiler cache (Windows)
-        if: runner.os == 'Windows'
-        uses: hendrikmuhs/ccache-action@v1.2.23
-        with:
-          variant: ccache
-          key: ${{ matrix.preset }}
-          max-size: 1G
-
-      # Same reasoning as Windows above, validated there first (18min cold
-      # -> 13min at a 40% hit rate -> 7m52s at 79% once the cache was
-      # actually sized to fit the working set). Folds the Xcode/clang
-      # version into the key for the same reason the vcpkg cache does below
-      # (comment on "Restore vcpkg binary cache") -- ccache's own
-      # CCACHE_COMPILERCHECK doesn't cover this action's restore/save cycle
-      # the way it does on the self-hosted runner's persistent directory.
-      - name: Setup compiler cache (hosted macOS)
-        if: runner.os == 'macOS' && runner.environment != 'self-hosted'
-        uses: hendrikmuhs/ccache-action@v1.2.23
-        with:
-          variant: ccache
-          key: ${{ matrix.preset }}-${{ steps.macos_toolchain.outputs.version }}
-          max-size: 1G
-
       - name: Configure self-hosted compiler cache
         if: runner.environment == 'self-hosted' && runner.os != 'Windows'
         run: |
@@ -669,15 +919,6 @@ jobs:
             find "$build_dir" -name '*.pch' -delete 2>/dev/null || true
           done
 
-      - name: Show Windows toolchain versions
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cmake --version
-          ninja --version
-          clang-cl --version
-          Get-Command link.exe
-
       - name: Configure self-hosted vcpkg binary cache
         if: runner.environment == 'self-hosted'
         run: |
@@ -685,27 +926,6 @@ jobs:
           mkdir -p .vcpkg-bincache
           rm -rf ".vcpkg-bincache/${{ matrix.vcpkg_triplet }}"
           ln -s "$HOME/.cache/vcpkg-bincache/${{ matrix.vcpkg_triplet }}" ".vcpkg-bincache/${{ matrix.vcpkg_triplet }}"
-
-      # vcpkg's binary cache fingerprints each package by an ABI hash that
-      # bakes in the compiler/toolchain version. Windows pins its LLVM
-      # version explicitly (KyleMayes/install-llvm-action above) so it can't
-      # drift, but hosted macOS's Xcode/clang comes from whatever the
-      # macos-latest image currently ships, which GitHub updates over time.
-      # Without the toolchain version in the cache key, a cache built under
-      # an older Xcode would keep matching this key forever while every
-      # package's ABI hash silently mismatches -- "cache hit" downloads a
-      # blob vcpkg then rejects and rebuilds from source anyway (observed:
-      # a 156MB "hit" followed by 27 packages rebuilt, incl. a 2min openssl
-      # build). Folding the toolchain version into the key means a version
-      # change naturally busts the cache instead of poisoning it forever.
-      - name: Restore vcpkg binary cache
-        if: runner.environment != 'self-hosted'
-        uses: actions/cache@v6
-        with:
-          path: .vcpkg-bincache/${{ matrix.vcpkg_triplet }}
-          key: vcpkg-${{ runner.os }}-${{ matrix.vcpkg_triplet }}-${{ steps.macos_toolchain.outputs.version }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/vcpkg-triplets/**', 'cmake/vcpkg-overlay-ports/**') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.vcpkg_triplet }}-${{ steps.macos_toolchain.outputs.version }}-
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
@@ -724,26 +944,6 @@ jobs:
 
       - name: Configure
         if: matrix.xcode != true && runner.environment == 'self-hosted'
-        run: >
-          cmake
-          --preset ${{ matrix.preset }}
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache
-          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-
-      # Every matrix leg now runs with ccache one way or another (self-hosted
-      # persistent dir, or actions/cache-backed for the two hosted legs
-      # below and Xcode further down) -- there's no longer a "leave the
-      # launcher unset" case to fall back to.
-      - name: Configure
-        if: matrix.xcode != true && runner.os == 'Windows'
-        run: >
-          cmake
-          --preset ${{ matrix.preset }}
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache
-          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-
-      - name: Configure
-        if: matrix.xcode != true && runner.os == 'macOS' && runner.environment != 'self-hosted'
         run: >
           cmake
           --preset ${{ matrix.preset }}
@@ -788,24 +988,12 @@ jobs:
             ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600 -E "${CTEST_EXCLUDE}"
           fi
 
-      - name: Test
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          CTEST_EXCLUDE: ${{ matrix.ctest_exclude }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:CTEST_EXCLUDE)) {
-            ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600
-          } else {
-            ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600 -E "$env:CTEST_EXCLUDE"
-          }
-
       - name: Show compiler cache stats
         if: always()
         run: ccache --show-stats
 
       - name: Smoke test macOS renderers
-        if: runner.os == 'macOS' && matrix.skip_tests != true && matrix.skip_smoke != true
+        if: runner.os == 'macOS' && matrix.skip_tests != true
         run: |
           '${{ matrix.build_dir }}/apps/tools/GL33SmokeTest/GL33SmokeTest' --check
           '${{ matrix.build_dir }}/apps/tools/MetalSmokeTest/MetalSmokeTest' --check
@@ -814,11 +1002,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          # matrix.name, not matrix.preset -- the hosted and self-hosted macOS
-          # legs share the same preset/build_dir (different runners entirely,
-          # no collision there) but actions/upload-artifact@v4 rejects two
-          # uploads with the same name within one workflow run, so the
-          # artifact name needs the thing that's actually unique per entry.
+          # matrix.name keeps artifacts unique across the self-hosted legs.
           name: ctest-logs-${{ matrix.name }}
           path: ${{ matrix.build_dir }}/Testing/
           if-no-files-found: ignore

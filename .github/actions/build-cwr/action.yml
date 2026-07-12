@@ -89,6 +89,15 @@ runs:
         -DCMAKE_CXX_COMPILER_LAUNCHER=${{ inputs.use-ccache == 'true' && 'ccache' || '' }}
         ${{ inputs.extra-cmake-args }}
 
+    - name: Verify compiler cache
+      if: inputs.use-ccache == 'true'
+      shell: bash
+      run: |
+        ccache --version
+        ccache --show-config
+        grep -Eq '^CMAKE_C_COMPILER_LAUNCHER(:[^=]+)?=ccache$' '${{ inputs.build-dir }}/CMakeCache.txt'
+        grep -Eq '^CMAKE_CXX_COMPILER_LAUNCHER(:[^=]+)?=ccache$' '${{ inputs.build-dir }}/CMakeCache.txt'
+
     - name: Build
       shell: bash
       run: cmake --build ${{ inputs.build-dir }} --parallel 2
