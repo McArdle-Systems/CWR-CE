@@ -20,6 +20,7 @@ use crate::client::GameInstance;
 use crate::scenarios::ScenarioResult;
 use anyhow::{Context, Result};
 use std::cmp::Reverse;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -1689,7 +1690,7 @@ pub async fn run_all(
     let out_dir = output_dir.to_path_buf();
 
     // --- Initial run ---
-    let (mp, pb, running_pb) = make_progress_display(total, concurrency);
+    let (mp, pb, running_pb, interactive) = make_progress_display(total, concurrency);
 
     let running_names: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1719,6 +1720,9 @@ pub async fn run_all(
                 let mut names = rn.lock().unwrap();
                 names.push(name.clone());
                 rpb.set_message(format_running(&names));
+            }
+            if !interactive {
+                println!("  START {name}");
             }
             let test = IntegrationTest {
                 name: name.clone(),
@@ -1751,6 +1755,9 @@ pub async fn run_all(
         let result = result?;
         pb.inc(1);
         bar_tick_eta(&pb);
+        if !interactive {
+            print_completed(results.len() + 1, total, &name, &result);
+        }
         results.push((name, result));
     }
     mp.clear().ok();
@@ -1825,6 +1832,9 @@ pub async fn run_all(
                     names.push(tname.clone());
                     rpb.set_message(format_running(&names));
                 }
+                if !interactive {
+                    println!("  START retry {attempt}/{retries} {tname}");
+                }
                 let t = IntegrationTest {
                     name: tname.clone(),
                     kind: tkind,
@@ -1888,10 +1898,13 @@ async fn run_all_sequential(
     let suite_start = Instant::now();
     let mut results = Vec::new();
 
-    let (mp, pb, running_pb) = make_progress_display(total, 1);
+    let (mp, pb, running_pb, interactive) = make_progress_display(total, 1);
 
     for test in tests {
         running_pb.set_message(test.name.clone());
+        if !interactive {
+            println!("  START {}", test.name);
+        }
         let result = run_test(
             test,
             game_dir,
@@ -1902,7 +1915,7 @@ async fn run_all_sequential(
             cli_game_args,
         )
         .await?;
-        if !result.passed {
+        if !result.passed && interactive {
             pb.suspend(|| {
                 println!(
                     "  {}FAIL{} {} -- {}",
@@ -1915,6 +1928,9 @@ async fn run_all_sequential(
         }
         pb.inc(1);
         bar_tick_eta(&pb);
+        if !interactive {
+            print_completed(results.len() + 1, total, &test.name, &result);
+        }
         results.push((test.name.clone(), result));
     }
     mp.clear().ok();
@@ -1957,6 +1973,9 @@ async fn run_all_sequential(
         for idx in failed {
             let test = &tests[idx];
             running_pb.set_message(test.name.clone());
+            if !interactive {
+                println!("  START retry {attempt}/{retries} {}", test.name);
+            }
             let result = run_test(
                 test,
                 game_dir,
@@ -2139,19 +2158,30 @@ fn make_progress_display(
     indicatif::MultiProgress,
     indicatif::ProgressBar,
     indicatif::ProgressBar,
+    bool,
 ) {
     use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
+    // indicatif's in-place terminal drawing is intentionally hidden by many
+    // IDE output panes and CI log collectors. In that case use hidden bars and
+    // let the runner emit durable START/PASS/FAIL lines instead.
+    let interactive = std::io::stderr().is_terminal();
     let mp = MultiProgress::new();
 
     // Line 1: main progress bar
     let pb = mp.add(ProgressBar::new(total as u64));
+    if !interactive {
+        pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
     update_bar_label(&pb, total, concurrency, None);
     pb.set_message("--"); // ETA placeholder until the first test completes
     pb.enable_steady_tick(std::time::Duration::from_millis(200));
 
     // Line 2: spinner showing running test(s)
     let running_pb = mp.add(ProgressBar::new_spinner());
+    if !interactive {
+        running_pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
     #[allow(clippy::literal_string_with_formatting_args)]
     let running_tpl = "  {spinner:.dim} {msg:.dim}";
     running_pb.set_style(
@@ -2161,7 +2191,20 @@ fn make_progress_display(
     );
     running_pb.enable_steady_tick(std::time::Duration::from_millis(150));
 
-    (mp, pb, running_pb)
+    (mp, pb, running_pb, interactive)
+}
+
+fn print_completed(done: usize, total: usize, name: &str, result: &ScenarioResult) {
+    let (status, color) = if result.passed {
+        ("PASS", color::GREEN)
+    } else {
+        ("FAIL", color::RED)
+    };
+    println!(
+        "  {color}{status}{} [{done}/{total}] {name} ({:.1}s)",
+        color::RESET,
+        result.duration.as_secs_f64()
+    );
 }
 
 fn print_failures(failures: &[(String, String)]) {
