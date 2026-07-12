@@ -33,11 +33,17 @@ triGpadPov 4            // Down -> Gamepad Tuning
 triWaitFrames 5
 triAssert [(triGetControlFocused 1406)]
 
-triGpadPov 4            // Down -> Touch Controls
+// Touch Controls is available on every platform whose mounted resource bundle
+// contains the row.  Some external game-data bundles can predate the engine's
+// touch UI; WrapFocus skips their missing row and lands directly on Reset All.
+private _hasTouchControls = (triAssert [(triGetControlVisible 1407)]) == "OK";
+triGpadPov 4            // Down -> Touch Controls, or Reset All when absent
 triWaitFrames 5
-triAssert [(triGetControlFocused 1407)]
+if (_hasTouchControls) then {
+    triAssert [(triGetControlFocused 1407)];
+    triGpadPov 4;       // Down -> Reset all to defaults
+};
 
-triGpadPov 4            // Down -> Reset all to defaults
 triWaitFrames 5
 triAssert [(triGetControlFocused 1403)]
 
