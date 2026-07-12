@@ -179,6 +179,9 @@ class EngineMTL : public Engine
 
     int AFrameTime() const override;
 
+    void Screenshot(RString filename) override { _pendingScreenshotPath = static_cast<const char*>(filename); }
+    void FlushPendingScreenshot() override {}
+
   private:
     int _w = 0, _h = 0; // backbuffer dimensions (pixels)
     int _pixelSize;
@@ -193,6 +196,7 @@ class EngineMTL : public Engine
     SDLEventWindow _eventWindow;
     EngineMTLBootstrap _bootstrap;
     bool _frameOpen = false; // true between InitDraw() and FinishDraw() -- mirrors EngineGL33::_frameOpen
+    RString _pendingScreenshotPath;
 
     TextBankMTL* _textBank = nullptr;
 

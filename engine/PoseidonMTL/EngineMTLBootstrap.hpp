@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include <Poseidon/Graphics/Rendering/RenderPassDescriptor.hpp>
 
 #include <cstddef>
@@ -255,7 +258,12 @@ class EngineMTLBootstrap
     void FlushTriangles2D();
 
     // Ends encoding, presents the drawable, commits the command buffer.
-    void EndFrame();
+    // Ends, presents and commits the current frame. When screenshotRGB is
+    // non-null, copies the final drawable (including UI/debug overlay) into
+    // top-down RGB bytes before releasing it. The synchronous readback is
+    // intentionally limited to explicit screenshot requests.
+    bool EndFrame(std::vector<uint8_t>* screenshotRGB = nullptr, int* screenshotWidth = nullptr,
+                  int* screenshotHeight = nullptr);
 
     // Decodes-then-uploads an RGBA8888 image as a new 2D texture (no
     // mipmaps -- menu/UI textures render close to 1:1). Returns a handle
