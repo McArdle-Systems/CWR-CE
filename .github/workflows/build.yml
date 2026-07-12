@@ -210,6 +210,10 @@ jobs:
       - trident-windows
     env:
       CWR_ARTIFACT_PREFIX: Windows-x64-rwdi
+      # GitHub's hosted Windows runner exposes only Microsoft's OpenGL 1.1
+      # software implementation. Run the renderer-independent suite here;
+      # Linux and macOS retain real GL33/Metal coverage.
+      TRIDENT_RENDER: dummy
 
     steps:
       - name: Checkout
@@ -277,6 +281,7 @@ jobs:
           exe/tri.exe test `
             --output-dir "$env:TRI_OUTPUT_DIR" `
             --render "$env:TRIDENT_RENDER" `
+            --tag headless `
             --retries 2 `
             --skip-tag ci-host-blocked `
             --game-arg --audio `
@@ -335,7 +340,7 @@ jobs:
           name: ${{ env.CWR_ARTIFACT_PREFIX }}-Game-${{ steps.build_metadata.outputs.sha_short }}
           path: |
             ${{ env.CWR_DIST_DIR }}/PoseidonGame
-            ${{ env.CWR_DIST_DIR }}/libopenal.dylib
+            ${{ env.CWR_DIST_DIR }}/libopenal*.dylib
           if-no-files-found: error
 
       - name: Upload GameDemo
@@ -344,7 +349,7 @@ jobs:
           name: ${{ env.CWR_ARTIFACT_PREFIX }}-GameDemo-${{ steps.build_metadata.outputs.sha_short }}
           path: |
             ${{ env.CWR_DIST_DIR }}/PoseidonGameDemo
-            ${{ env.CWR_DIST_DIR }}/libopenal.dylib
+            ${{ env.CWR_DIST_DIR }}/libopenal*.dylib
           if-no-files-found: error
 
       - name: Upload Server
@@ -414,6 +419,7 @@ jobs:
       - trident-macos
     env:
       CWR_ARTIFACT_PREFIX: macOS-arm64-rwdi
+      TRIDENT_RENDER: mtl
 
     steps:
       - name: Checkout
@@ -484,6 +490,10 @@ jobs:
             --game-arg "$TRIDENT_AUDIO" \
             --game-arg --no-strict \
             tests/integration
+
+      - name: Fix Trident output permissions
+        if: failure()
+        run: chmod -R u+rwX trident-output || true
 
       - name: Upload Trident output
         if: failure()

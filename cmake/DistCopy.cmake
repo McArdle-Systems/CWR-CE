@@ -15,6 +15,13 @@ function(dist_copy TARGET)
         set(_dst "${DIST_DIR}/$<TARGET_FILE_NAME:${TARGET}>")
     endif()
 
+    # Dist artifacts are run outside the build tree by downstream jobs. Keep
+    # adjacent dylibs discoverable instead of relying only on vcpkg's absolute
+    # build-directory rpath.
+    if(APPLE)
+        set_property(TARGET ${TARGET} APPEND PROPERTY BUILD_RPATH "@executable_path")
+    endif()
+
     add_custom_command(TARGET ${TARGET} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory ${DIST_DIR}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:${TARGET}> ${_dst}
@@ -66,7 +73,8 @@ function(dist_copy TARGET)
             if(WIN32)
                 set(_openal_dst "${DIST_DIR}")
             else()
-                set(_openal_dst "${DIST_DIR}/libopenal.dylib")
+                get_filename_component(_openal_name "${_openal_lib}" NAME)
+                set(_openal_dst "${DIST_DIR}/${_openal_name}")
             endif()
             add_custom_command(TARGET ${TARGET} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -90,6 +98,7 @@ function(dist_copy TARGET)
                 unset(_openal_copyright)
             endif()
             unset(_openal_dst)
+            unset(_openal_name)
         endif()
         unset(_openal_lib)
     endif()
