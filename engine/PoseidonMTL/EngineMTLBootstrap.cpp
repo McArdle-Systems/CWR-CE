@@ -760,6 +760,9 @@ bool EngineMTLBootstrap::SetupDevice()
 
     _impl->layer->setDevice(_impl->device);
     _impl->layer->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    // Explicit screenshots copy the drawable into a CPU-visible buffer.
+    // CAMetalLayer's framebuffer-only default rejects using it as a blit source.
+    _impl->layer->setFramebufferOnly(false);
     // Engine code skips the color clear on some Clear() calls (e.g. additive
     // animation/trail effects) on the assumption that the buffer it's about
     // to draw into already holds exactly last frame's image -- true under
@@ -1621,10 +1624,10 @@ void EngineMTLBootstrap::DrawTriangles2D(const Vertex2DMTL* verts, int vertCount
         _impl->queued2DIndices[firstNewIndex + static_cast<size_t>(i)] = static_cast<uint16_t>(indices[i] + baseVertex);
 }
 
-void EngineMTLBootstrap::EndFrame()
+bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* screenshotWidth, int* screenshotHeight)
 {
     if (_impl->currentEncoder == nullptr)
-        return;
+        return false;
 
     FlushTriangles2D();
 
@@ -1637,8 +1640,54 @@ void EngineMTLBootstrap::EndFrame()
 
     _impl->currentEncoder->endEncoding();
 
+    MTL::Buffer* screenshotBuffer = nullptr;
+    int captureWidth = 0;
+    int captureHeight = 0;
+    size_t captureBytesPerRow = 0;
+    if (screenshotRGB != nullptr)
+    {
+        MTL::Texture* drawableTexture = _impl->currentDrawable->texture();
+        captureWidth = static_cast<int>(drawableTexture->width());
+        captureHeight = static_cast<int>(drawableTexture->height());
+        captureBytesPerRow = (static_cast<size_t>(captureWidth) * 4u + 255u) & ~size_t(255u);
+        screenshotBuffer = _impl->device->newBuffer(captureBytesPerRow * static_cast<size_t>(captureHeight),
+                                                    MTL::ResourceStorageModeShared);
+        if (screenshotBuffer != nullptr)
+        {
+            MTL::BlitCommandEncoder* blit = _impl->currentCommandBuffer->blitCommandEncoder();
+            blit->copyFromTexture(drawableTexture, 0, 0, MTL::Origin(0, 0, 0),
+                                  MTL::Size(captureWidth, captureHeight, 1), screenshotBuffer, 0, captureBytesPerRow,
+                                  captureBytesPerRow * static_cast<size_t>(captureHeight));
+            blit->endEncoding();
+        }
+    }
+
     _impl->currentCommandBuffer->presentDrawable(_impl->currentDrawable);
     _impl->currentCommandBuffer->commit();
+
+    const bool screenshotCaptured = screenshotBuffer != nullptr;
+    if (screenshotCaptured)
+    {
+        _impl->currentCommandBuffer->waitUntilCompleted();
+        screenshotRGB->resize(static_cast<size_t>(captureWidth) * static_cast<size_t>(captureHeight) * 3u);
+        const auto* bgra = static_cast<const uint8_t*>(screenshotBuffer->contents());
+        for (int y = 0; y < captureHeight; ++y)
+        {
+            const uint8_t* src = bgra + static_cast<size_t>(y) * captureBytesPerRow;
+            uint8_t* dst = screenshotRGB->data() + static_cast<size_t>(y) * static_cast<size_t>(captureWidth) * 3u;
+            for (int x = 0; x < captureWidth; ++x)
+            {
+                dst[x * 3 + 0] = src[x * 4 + 2];
+                dst[x * 3 + 1] = src[x * 4 + 1];
+                dst[x * 3 + 2] = src[x * 4 + 0];
+            }
+        }
+        if (screenshotWidth != nullptr)
+            *screenshotWidth = captureWidth;
+        if (screenshotHeight != nullptr)
+            *screenshotHeight = captureHeight;
+        screenshotBuffer->release();
+    }
 
     _impl->currentEncoder->release();
     _impl->currentCommandBuffer->release();
@@ -1680,6 +1729,7 @@ void EngineMTLBootstrap::EndFrame()
         DestroyMeshBuffer(h);
     _impl->pendingMeshBufferDestroy[oldGen].clear();
     _impl->destroyGeneration = oldGen;
+    return screenshotRGB == nullptr || screenshotCaptured;
 }
 
 int EngineMTLBootstrap::CreateMeshBuffer(const void* data, size_t byteSize, bool dynamic, const char* debugLabel)

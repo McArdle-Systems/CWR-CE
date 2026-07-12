@@ -6,6 +6,7 @@
 #include <Poseidon/Core/Config/EngineConfig.hpp>
 #include <Poseidon/Dev/Debug/DebugOverlay.hpp>
 #include <Poseidon/Graphics/Shared/WindowPlacement.hpp>
+#include <Poseidon/Graphics/Shared/ScreenshotWriter.hpp>
 #include <Poseidon/Graphics/Core/TLVertex.hpp>
 #include <Poseidon/Graphics/Core/MatrixConversion.hpp>
 #include <Poseidon/Graphics/Rendering/BuildRenderPassDescriptor.hpp>
@@ -243,7 +244,22 @@ void EngineMTL::FinishDraw()
 
 void EngineMTL::NextFrame()
 {
-    _bootstrap.EndFrame();
+    if (_pendingScreenshotPath.GetLength() > 0)
+    {
+        const RString path = _pendingScreenshotPath;
+        std::vector<uint8_t> rgb;
+        int width = 0;
+        int height = 0;
+        if (_bootstrap.EndFrame(&rgb, &width, &height) && !rgb.empty())
+        {
+            ScreenshotWriter::WriteRGB(path, width, height, rgb.data());
+            _pendingScreenshotPath = "";
+        }
+    }
+    else
+    {
+        _bootstrap.EndFrame();
+    }
     Engine::NextFrame();
 }
 

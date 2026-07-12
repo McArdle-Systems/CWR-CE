@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include <Poseidon/Graphics/Rendering/RenderPassDescriptor.hpp>
 
 #include <cstddef>
@@ -57,8 +60,8 @@ struct Mat4RowsMTL
 // (v1 simplicity) rather than cached across the run of draws within a pass.
 struct FrameConstantsMTL
 {
-    Mat4RowsMTL view;       // rotation only, translation zeroed (camera-relative)
-    Mat4RowsMTL projection; // camera projection (with z-bias already folded in)
+    Mat4RowsMTL view;          // rotation only, translation zeroed (camera-relative)
+    Mat4RowsMTL projection;    // camera projection (with z-bias already folded in)
     float sunDirAndEnabled[4]; // xyz = direction, w = 1.0/0.0 enabled
     float fogParams[4];        // start, invRange, enabled, 0
     float fogColor[4];         // rgb, a=1
@@ -71,7 +74,8 @@ struct FrameConstantsMTL
     float gl33CamPosZero[4];
 };
 
-static_assert(offsetof(FrameConstantsMTL, gl33CamPosZero) == 176, "FrameConstantsMTL camPos slot offset must match MSL");
+static_assert(offsetof(FrameConstantsMTL, gl33CamPosZero) == 176,
+              "FrameConstantsMTL camPos slot offset must match MSL");
 static_assert(sizeof(FrameConstantsMTL) == 192, "FrameConstantsMTL size must match MSL FrameConstants");
 
 // One local point/spot light, matching GL33's per-light VSConstants layout
@@ -250,12 +254,16 @@ class EngineMTLBootstrap
                          Poseidon::render::SurfaceMode surface = Poseidon::render::SurfaceMode::Default,
                          Poseidon::render::ShaderFamily shader = Poseidon::render::ShaderFamily::Normal,
                          Poseidon::render::AlphaMode alphaMode = Poseidon::render::AlphaMode::Disabled,
-                         std::uint8_t alphaRef = 0,
-                         const float fogColor[3] = nullptr);
+                         std::uint8_t alphaRef = 0, const float fogColor[3] = nullptr);
     void FlushTriangles2D();
 
     // Ends encoding, presents the drawable, commits the command buffer.
-    void EndFrame();
+    // Ends, presents and commits the current frame. When screenshotRGB is
+    // non-null, copies the final drawable (including UI/debug overlay) into
+    // top-down RGB bytes before releasing it. The synchronous readback is
+    // intentionally limited to explicit screenshot requests.
+    bool EndFrame(std::vector<uint8_t>* screenshotRGB = nullptr, int* screenshotWidth = nullptr,
+                  int* screenshotHeight = nullptr);
 
     // Decodes-then-uploads an RGBA8888 image as a new 2D texture (no
     // mipmaps -- menu/UI textures render close to 1:1). Returns a handle
@@ -409,8 +417,8 @@ class EngineMTLBootstrap
     // fence panel via UV coordinates >1) need wrap/repeat addressing; a
     // hardcoded clamp-to-edge sampler just repeats the texture's edge pixel
     // across the whole surface instead of tiling it.
-    void DrawSectionTL(int vertexBufferHandle, int indexBufferHandle, int firstIndex, int indexCount,
-                       int textureHandle, int secondaryTextureHandle, const ObjectConstantsMTL& obj, const FrameConstantsMTL& frame,
+    void DrawSectionTL(int vertexBufferHandle, int indexBufferHandle, int firstIndex, int indexCount, int textureHandle,
+                       int secondaryTextureHandle, const ObjectConstantsMTL& obj, const FrameConstantsMTL& frame,
                        Poseidon::render::DepthMode depthMode, Poseidon::render::BlendMode blendMode,
                        Poseidon::render::SamplerMode sampler, Poseidon::render::SurfaceMode surface,
                        Poseidon::render::ShaderFamily shader);
@@ -418,8 +426,8 @@ class EngineMTLBootstrap
   private:
     bool SetupDevice(); // shared by Init() and AttachToWindow()
     void ApplyDrawableSize(int fallbackWidth, int fallbackHeight, const char* reason);
-    void EnsurePipeline();         // lazy: compiles the embedded 2D MSL shader + pipeline state + depth states
-    void EnsureTLPipeline();       // lazy: compiles the embedded mesh MSL shader + pipeline state
+    void EnsurePipeline();          // lazy: compiles the embedded 2D MSL shader + pipeline state + depth states
+    void EnsureTLPipeline();        // lazy: compiles the embedded mesh MSL shader + pipeline state
     void EnsureFallbackResources(); // lazy: 1x1 opaque white texture + sampler
     void EnsureDepthTarget(int width, int height); // (re)creates the depth texture to match the drawable size
 

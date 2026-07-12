@@ -103,8 +103,8 @@ class EngineMTL : public Engine
                    int specFlags) override;
 
     void Draw2D(const Draw2DPars& pars, const Rect2DAbs& rect, const Rect2DAbs& clip = Rect2DClipAbs) override;
-    void DrawPoly(const MipInfo& mip, const Vertex2DAbs* vertices, int nVertices,
-                  const Rect2DAbs& clip = Rect2DClipAbs, int specFlags = DefSpecFlags2D) override;
+    void DrawPoly(const MipInfo& mip, const Vertex2DAbs* vertices, int nVertices, const Rect2DAbs& clip = Rect2DClipAbs,
+                  int specFlags = DefSpecFlags2D) override;
     void DrawPoly(const MipInfo& mip, const Vertex2DPixel* vertices, int nVertices,
                   const Rect2DPixel& clip = Rect2DClipPixel, int specFlags = DefSpecFlags2D) override;
     void DrawLine(const Line2DAbs& rect, PackedColor c0, PackedColor c1,
@@ -179,6 +179,9 @@ class EngineMTL : public Engine
 
     int AFrameTime() const override;
 
+    void Screenshot(RString filename) override { _pendingScreenshotPath = static_cast<const char*>(filename); }
+    void FlushPendingScreenshot() override {}
+
   private:
     int _w = 0, _h = 0; // backbuffer dimensions (pixels)
     int _pixelSize;
@@ -193,6 +196,7 @@ class EngineMTL : public Engine
     SDLEventWindow _eventWindow;
     EngineMTLBootstrap _bootstrap;
     bool _frameOpen = false; // true between InitDraw() and FinishDraw() -- mirrors EngineGL33::_frameOpen
+    RString _pendingScreenshotPath;
 
     TextBankMTL* _textBank = nullptr;
 
