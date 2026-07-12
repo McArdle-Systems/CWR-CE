@@ -103,8 +103,8 @@ class EngineMTL : public Engine
                    int specFlags) override;
 
     void Draw2D(const Draw2DPars& pars, const Rect2DAbs& rect, const Rect2DAbs& clip = Rect2DClipAbs) override;
-    void DrawPoly(const MipInfo& mip, const Vertex2DAbs* vertices, int nVertices,
-                  const Rect2DAbs& clip = Rect2DClipAbs, int specFlags = DefSpecFlags2D) override;
+    void DrawPoly(const MipInfo& mip, const Vertex2DAbs* vertices, int nVertices, const Rect2DAbs& clip = Rect2DClipAbs,
+                  int specFlags = DefSpecFlags2D) override;
     void DrawPoly(const MipInfo& mip, const Vertex2DPixel* vertices, int nVertices,
                   const Rect2DPixel& clip = Rect2DClipPixel, int specFlags = DefSpecFlags2D) override;
     void DrawLine(const Line2DAbs& rect, PackedColor c0, PackedColor c1,

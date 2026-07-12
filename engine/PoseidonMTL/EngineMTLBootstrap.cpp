@@ -1651,13 +1651,13 @@ bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* scre
         captureHeight = static_cast<int>(drawableTexture->height());
         captureBytesPerRow = (static_cast<size_t>(captureWidth) * 4u + 255u) & ~size_t(255u);
         screenshotBuffer = _impl->device->newBuffer(captureBytesPerRow * static_cast<size_t>(captureHeight),
-                                                     MTL::ResourceStorageModeShared);
+                                                    MTL::ResourceStorageModeShared);
         if (screenshotBuffer != nullptr)
         {
             MTL::BlitCommandEncoder* blit = _impl->currentCommandBuffer->blitCommandEncoder();
             blit->copyFromTexture(drawableTexture, 0, 0, MTL::Origin(0, 0, 0),
-                                  MTL::Size(captureWidth, captureHeight, 1), screenshotBuffer, 0,
-                                  captureBytesPerRow, captureBytesPerRow * static_cast<size_t>(captureHeight));
+                                  MTL::Size(captureWidth, captureHeight, 1), screenshotBuffer, 0, captureBytesPerRow,
+                                  captureBytesPerRow * static_cast<size_t>(captureHeight));
             blit->endEncoding();
         }
     }
