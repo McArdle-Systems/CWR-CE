@@ -304,6 +304,14 @@ jobs:
             --game-arg --no-strict \
             tests/integration
 
+      - name: Fix Trident output permissions
+        # Game-spawned instance dirs under trident-output (e.g. a server's
+        # temp mission-bank dir) can end up without traversal/read bits for
+        # the runner's own user, which fails the upload step below with
+        # EACCES even though it's the same user throughout the job.
+        if: failure()
+        run: chmod -R u+rwX trident-output || true
+
       - name: Upload Trident output
         if: failure()
         uses: actions/upload-artifact@v4
