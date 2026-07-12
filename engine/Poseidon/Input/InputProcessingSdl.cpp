@@ -452,6 +452,11 @@ void ProcessJoystick_SDL()
     for (int i = 0; i < N_JOYSTICK_AXES; i++)
         GInput.gamepad.stickAxis[i] = 0;
 
+    // Button edge-detection state -- declared here (rather than at its
+    // point of use further down) so the early-return branch below can
+    // reset it; see the comment there for why that reset matters.
+    static bool sPrev[N_JOYSTICK_BUTTONS] = {};
+
     if (!sGamepad)
     {
         // Graphics backends call SDL_Init(SDL_INIT_VIDEO) only, so the
@@ -478,6 +483,18 @@ void ProcessJoystick_SDL()
 
     if ((!sGamepad && !hasSyntheticStickInput) || !GWorld->IsUserInputEnabled())
     {
+        // stickPov/stickPovToDo are already cleared unconditionally above, but
+        // stickPovOld/sPrev are edge-detection state that's only otherwise
+        // updated further down (skipped by this early return) -- without
+        // resetting them here too, they go stale at whatever they were on the
+        // last active frame. A later synthetic POV/button press (triGpadPov /
+        // triGpadButton in Trident tests, which set one frame of synthetic
+        // input and then go idle) would then compare against that stale
+        // "held" value and see no edge, silently dropping the press.
+        for (int i = 0; i < N_JOYSTICK_POV; i++)
+            GInput.gamepad.stickPovOld[i] = false;
+        for (int i = 0; i < N_JOYSTICK_BUTTONS; i++)
+            sPrev[i] = false;
         sControllerEditorUiLayout.ResetDirections();
         sRumble.Update(sGamepad);
         return;
@@ -541,7 +558,6 @@ void ProcessJoystick_SDL()
     // [0]=A  [1]=B  [2]=X  [3]=Y  [4]=LB  [5]=RB
     // [6]=LT threshold  [7]=RT threshold
     // [8]=Back  [9]=Start  [10]=LThumb  [11]=RThumb
-    static bool sPrev[N_JOYSTICK_BUTTONS] = {};
     const SDL_GamepadButton kButtons[12] = {
         SDL_GAMEPAD_BUTTON_SOUTH,          // [0] A
         SDL_GAMEPAD_BUTTON_EAST,           // [1] B

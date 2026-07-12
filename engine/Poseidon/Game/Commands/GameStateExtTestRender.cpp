@@ -108,12 +108,14 @@ using Poseidon::Foundation::LoggingSystem;
 using Poseidon::Foundation::MemoryUsed;
 using Poseidon::Foundation::Time;
 
-extern void SDLInput_BufferControllerUiAction(Poseidon::ControllerUiAction action, bool menuFallback);
-extern void SDLInput_BufferKeyEvent(SDL_Scancode sc, bool down, DWORD timestamp);
-
 /// triGpadButton <index> — synthesize a gamepad button-press event
-/// for harness tests. Also injects the matching controller UI action for
-/// menu/editor navigation tests without a physical SDL pad.
+/// for harness tests. ProcessJoystick_SDL polls and consumes this synthetic
+/// state once per frame with the same edge-detected Confirm/Cancel/Preview/
+/// etc. dispatch used for a real controller's buttons
+/// (InputProcessingSdl.cpp's BufferControllerFaceAndShoulderIntents) — do not
+/// also inject the UI action directly here, or a single press double-fires
+/// (e.g. two Cancel events from one triGpadButton 1, popping two navigation
+/// levels instead of one).
 /// Mapping:
 /// 0=A, 1=B, 2=X, 3=Y, 4=LB, 5=RB, 8=Back, 9=Start, 10=LStick, 11=RStick.
 GameValue TriGpadButton(const GameState* state, GameValuePar arg)
@@ -124,44 +126,16 @@ GameValue TriGpadButton(const GameState* state, GameValuePar arg)
         LOG_ERROR(Core, "[tri] triGpadButton: index {} out of range", i);
         return GameValue(false);
     }
-    // Write to the synthetic buffer — ProcessJoystick's per-frame clear
-    // would otherwise wipe a direct GInput write before the consumer reads it.
     InputSubsystem::Instance().SetSyntheticStickButton(i, true);
-    if (i == 0)
-        SDLInput_BufferControllerUiAction(GWorld && GWorld->IsEditorControllerUiActive()
-                                              ? ControllerUiAction::PrimaryClick
-                                              : ControllerUiAction::Confirm,
-                                          true); // A -> confirm in menus, primary click in editor
-    else if (i == 1)
-    {
-        if (GWorld && GWorld->GetCameraEffect())
-        {
-            DWORD now = GlobalTickCount();
-            SDLInput_BufferKeyEvent(SDL_SCANCODE_ESCAPE, true, now);
-            SDLInput_BufferKeyEvent(SDL_SCANCODE_ESCAPE, false, now + 1);
-        }
-        SDLInput_BufferControllerUiAction(ControllerUiAction::Cancel, true); // B -> cancel/back in menus
-    }
-    else if (i == 2)
-        SDLInput_BufferControllerUiAction(ControllerUiAction::Preview, false);
-    else if (i == 3)
-        SDLInput_BufferControllerUiAction(ControllerUiAction::Delete, false);
-    else if (i == 4)
-        SDLInput_BufferControllerUiAction(ControllerUiAction::PreviousTab, false);
-    else if (i == 5)
-        SDLInput_BufferControllerUiAction(ControllerUiAction::NextTab, false);
-    else if (i == 6)
-        SDLInput_BufferControllerUiAction(ControllerUiAction::PagePrevious, true);
-    else if (i == 7)
-        SDLInput_BufferControllerUiAction(ControllerUiAction::PageNext, true);
-    else if (i == 9)
-        SDLInput_BufferControllerUiAction(ControllerUiAction::Pause, false);
     return GameValue(true);
 }
 
 /// triGpadPov <index> — synthesize a D-pad press.  Index is 8-way
-/// (0=N, 2=E, 4=S, 6=W; diagonals 1/3/5/7).  Cardinal directions also
-/// inject the matching controller UI action for menu-navigation parity tests.
+/// (0=N, 2=E, 4=S, 6=W; diagonals 1/3/5/7).  ProcessJoystick_SDL polls and
+/// consumes this synthetic state once per frame with the same edge-detected
+/// NavigateUp/Down/Left/Right dispatch used for a real controller's D-pad
+/// (InputProcessingSdl.cpp) — do not also inject the UI action directly here,
+/// or a single press double-fires (two focus steps per triGpadPov call).
 GameValue TriGpadPov(const GameState* state, GameValuePar arg)
 {
     int i = static_cast<int>(static_cast<GameScalarType>(arg));
@@ -171,23 +145,6 @@ GameValue TriGpadPov(const GameState* state, GameValuePar arg)
         return GameValue(false);
     }
     InputSubsystem::Instance().SetSyntheticStickPov(i, true);
-    switch (i)
-    {
-        case 0:
-            SDLInput_BufferControllerUiAction(ControllerUiAction::NavigateUp, true);
-            break;
-        case 2:
-            SDLInput_BufferControllerUiAction(ControllerUiAction::NavigateRight, true);
-            break;
-        case 4:
-            SDLInput_BufferControllerUiAction(ControllerUiAction::NavigateDown, true);
-            break;
-        case 6:
-            SDLInput_BufferControllerUiAction(ControllerUiAction::NavigateLeft, true);
-            break;
-        default:
-            break;
-    }
     return GameValue(true);
 }
 
