@@ -181,6 +181,8 @@ class EngineMTL : public Engine
 
     void Screenshot(RString filename) override { _pendingScreenshotPath = static_cast<const char*>(filename); }
     void FlushPendingScreenshot() override {}
+    int SampleBackBufferNonBlack() override;
+    bool SamplePixel(int x, int y, uint8_t* outRGB) override;
 
   private:
     int _w = 0, _h = 0; // backbuffer dimensions (pixels)
@@ -197,6 +199,13 @@ class EngineMTL : public Engine
     EngineMTLBootstrap _bootstrap;
     bool _frameOpen = false; // true between InitDraw() and FinishDraw() -- mirrors EngineGL33::_frameOpen
     RString _pendingScreenshotPath;
+    // Synchronous drawable readback is intentionally opt-in: Trident needs
+    // stable pixels after a frame has been presented, while ordinary game
+    // runs should not pay the GPU/CPU synchronization cost every frame.
+    bool _tridentReadback = false;
+    std::vector<uint8_t> _lastFrameRGB;
+    int _lastFrameWidth = 0;
+    int _lastFrameHeight = 0;
 
     TextBankMTL* _textBank = nullptr;
 

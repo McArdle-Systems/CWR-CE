@@ -1,1 +1,4 @@
-tags = ["demo", "headless"]
+# Closing this modal relies on a presented frame. The dummy renderer used by
+# hosted Windows intentionally has no presentation path; Linux GL33 and macOS
+# Metal continue to exercise this scenario.
+tags = ["demo", "headless", "dummy-incompatible"]

@@ -1,4 +1,6 @@
 binary = "PoseidonGame"
 no_menu = true
 timeout = 60
-tags = ["headless"]
+# The EAX round-trip requires OpenAL Soft's EFX extension; CI's macOS null
+# audio device does not advertise it.
+tags = ["headless", "efx-required"]

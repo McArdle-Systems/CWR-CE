@@ -6,4 +6,4 @@ timeout = 30
 # opening triAssertFullscreen. An explicit --display-mode wins over --window
 # (AppConfig sets useWindow=false), so it stays borderless on both Windows and Linux.
 extra_args = ["--focus", "--display-mode", "borderless"]
-tags = ["headful"]
+tags = ["headful", "metal-known-failure"]

@@ -21,6 +21,7 @@
 #include <Poseidon/Foundation/Logging/Logging.hpp>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -46,6 +47,8 @@ EngineMTL::EngineMTL(int width, int height, bool windowed, int bpp)
     _windowedRestoreH = height;
     _pixelSize = bpp;
     _refreshRate = 60;
+    const char* readback = std::getenv("TRIDENT_METAL_READBACK");
+    _tridentReadback = readback != nullptr && readback[0] != '\0' && std::strcmp(readback, "0") != 0;
 
     LOG_INFO(Graphics, "MTL: Initializing engine — bootstrap {}x{} {}bpp {}", _w, _h, _pixelSize,
              _windowed ? "windowed" : "fullscreen");
@@ -244,7 +247,7 @@ void EngineMTL::FinishDraw()
 
 void EngineMTL::NextFrame()
 {
-    if (_pendingScreenshotPath.GetLength() > 0)
+    if (_tridentReadback || _pendingScreenshotPath.GetLength() > 0)
     {
         const RString path = _pendingScreenshotPath;
         std::vector<uint8_t> rgb;
@@ -252,8 +255,14 @@ void EngineMTL::NextFrame()
         int height = 0;
         if (_bootstrap.EndFrame(&rgb, &width, &height) && !rgb.empty())
         {
-            ScreenshotWriter::WriteRGB(path, width, height, rgb.data());
-            _pendingScreenshotPath = "";
+            _lastFrameRGB = std::move(rgb);
+            _lastFrameWidth = width;
+            _lastFrameHeight = height;
+            if (path.GetLength() > 0)
+            {
+                ScreenshotWriter::WriteRGB(path, width, height, _lastFrameRGB.data());
+                _pendingScreenshotPath = "";
+            }
         }
     }
     else
@@ -261,6 +270,41 @@ void EngineMTL::NextFrame()
         _bootstrap.EndFrame();
     }
     Engine::NextFrame();
+}
+
+int EngineMTL::SampleBackBufferNonBlack()
+{
+    if (!_tridentReadback || _lastFrameRGB.empty() || _lastFrameWidth <= 0 || _lastFrameHeight <= 0)
+        return -1;
+
+    int nonBlack = 0;
+    for (int sy = 0; sy < 16; ++sy)
+    {
+        const int y = _lastFrameHeight * sy / 16;
+        for (int sx = 0; sx < 16; ++sx)
+        {
+            const int x = _lastFrameWidth * sx / 16;
+            const size_t offset =
+                (static_cast<size_t>(y) * static_cast<size_t>(_lastFrameWidth) + static_cast<size_t>(x)) * 3u;
+            if (_lastFrameRGB[offset] > 2 || _lastFrameRGB[offset + 1] > 2 || _lastFrameRGB[offset + 2] > 2)
+                ++nonBlack;
+        }
+    }
+    return nonBlack;
+}
+
+bool EngineMTL::SamplePixel(int x, int y, uint8_t* outRGB)
+{
+    if (!_tridentReadback || outRGB == nullptr || _lastFrameRGB.empty() || x < 0 || y < 0 ||
+        x >= _lastFrameWidth || y >= _lastFrameHeight)
+        return false;
+
+    const size_t offset =
+        (static_cast<size_t>(y) * static_cast<size_t>(_lastFrameWidth) + static_cast<size_t>(x)) * 3u;
+    outRGB[0] = _lastFrameRGB[offset];
+    outRGB[1] = _lastFrameRGB[offset + 1];
+    outRGB[2] = _lastFrameRGB[offset + 2];
+    return true;
 }
 
 void EngineMTL::PixelToNDC(float px, float py, float& ndcX, float& ndcY) const
