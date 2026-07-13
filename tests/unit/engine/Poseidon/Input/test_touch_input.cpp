@@ -37,6 +37,12 @@ SDL_TouchFingerEvent Finger(SDL_EventType type, SDL_FingerID id, float x, float 
 
 void ClearBufferedInput()
 {
+    auto& input = InputSubsystem::Instance();
+    for (int i = 0; i < 12; ++i)
+        input.ConsumeSyntheticStickButton(i);
+    for (int i = 0; i < 8; ++i)
+        input.ConsumeSyntheticStickPov(i);
+
     GInput.mouse.DiscardBuffered();
     GInput.mouse.FlushAndReset();
     for (int i = 0; i < N_MOUSE_BUTTONS; ++i)
@@ -613,6 +619,7 @@ TEST_CASE("TouchInput: action button hold-drag emits action menu scroll steps", 
     CHECK(state.buttons[(int)TouchButton::Action]);
     CHECK(state.actionScrollActive);
     CHECK(state.actionScrollSteps == 1);
+    CHECK_FALSE(InputSubsystem::Instance().ConsumeSyntheticStickButton(0));
 
     TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_MOTION, 1, kActionButtonX, kActionButtonY + 0.07f));
     TouchInput_ProcessFrame(1920, 1080);
@@ -625,6 +632,24 @@ TEST_CASE("TouchInput: action button hold-drag emits action menu scroll steps", 
 
     GInput.keyboard.Update(Poseidon::Foundation::GlobalTickCount(), 16, true);
     CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_RETURN]);
+}
+
+TEST_CASE("TouchInput: holding action does not emit synthetic confirm", "[input][touch]")
+{
+    TouchFixture fixture;
+    TouchInput_TestSetGameplaySceneOverride(true, true);
+
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, kActionButtonX, kActionButtonY));
+
+    // Processing multiple frames models holding the button while an action
+    // source force-shows its menu. No frame may synthesize gamepad A/Confirm.
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK_FALSE(InputSubsystem::Instance().ConsumeSyntheticStickButton(0));
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK_FALSE(InputSubsystem::Instance().ConsumeSyntheticStickButton(0));
+
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_UP, 1, kActionButtonX, kActionButtonY));
+    CHECK(InputSubsystem::Instance().ConsumeSyntheticStickButton(0));
 }
 
 TEST_CASE("TouchInput: quick action tap emits action key on release", "[input][touch]")

@@ -1352,7 +1352,6 @@ void EmitButtonHeld(TouchButton button)
         case TouchButton::Fire:
             break;
         case TouchButton::Action:
-            InputSubsystem::Instance().SetSyntheticStickButton(0, true);
             break;
         default:
             break;
@@ -1618,13 +1617,16 @@ void TouchInput_HandleFingerEvent(const SDL_TouchFingerEvent& event)
 
     if (release)
     {
-        if (finger->role == FingerRole::Button && finger->button == TouchButton::Action &&
-            sActionScrollFingerId == finger->id)
-            ResetActionScroll();
+        const bool resetActionScroll = finger->role == FingerRole::Button && finger->button == TouchButton::Action &&
+                                       sActionScrollFingerId == finger->id;
         if (finger->role == FingerRole::Button && finger->button == TouchButton::Equipment && sEquipmentRadialActive &&
             sEquipmentFingerId == finger->id)
             sEquipmentHover = HitEquipmentItem(finger->x, finger->y);
         EmitFingerButtonEdge(*finger, false);
+        // Keep the completed gesture state available to the release handler so
+        // a scrolled action-button gesture cannot be reclassified as a tap.
+        if (resetActionScroll)
+            ResetActionScroll();
         ReleaseDirectTouchFinger(*finger);
         const bool quickTap = Glob.uiTime - finger->startTime <= kTapMaxSeconds;
         if (finger->role == FingerRole::Look && finger->maxTravel <= kTapMaxTravel && quickTap && IsGameplayScene())
