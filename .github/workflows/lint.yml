@@ -7,6 +7,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   clang-format:
     name: Lint
@@ -15,6 +18,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Auto-format commits must target the contributor branch, not the
+          # synthetic pull-request merge ref checked out by default.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || github.ref }}
 
       - name: Setup LLVM and Clang
         uses: KyleMayes/install-llvm-action@v2
@@ -22,25 +29,23 @@ jobs:
           version: '21'
           arch: 'x64'
 
+      - name: Auto-format same-repository pull requests
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          clang-format --version
+          .github/scripts/clang-format.sh --fix
+
+          if git diff --quiet; then
+            exit 0
+          fi
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -u
+          git commit -m "Apply clang-format"
+          git push
+
       - name: Check C++ formatting
         run: |
           clang-format --version
-          {
-            git ls-files 'apps/*.cpp' 'engine/*.cpp' 'tests/*.cpp'
-            git ls-files 'apps/tools/Studio/StudioApp.hpp'
-            git ls-files 'apps/tools/Studio/StudioConfig.hpp'
-            git ls-files 'apps/tools/Tools/SDLPreview.hpp'
-            git ls-files 'apps/tools/Tools/commands/*.hpp'
-            git ls-files 'tests/unit/engine/Poseidon/Asset/Formats/BISFramework/test_helpers.hpp'
-            git ls-files 'tests/unit/engine/Poseidon/Support/test_fixtures.hpp'
-            git ls-files 'tests/unit/engine/Poseidon/Support/test_stubs.hpp'
-            git ls-files 'tests/unit/engine/Poseidon/test_fixtures.hpp'
-          } | sort -u \
-            | grep -v -E '(^|/)pch\.(cpp|hpp)$' \
-            | grep -v -E '^tests/fixtures/' \
-            | grep -v -E '^engine/(PoseidonFormats|PoseidonGL33|PoseidonOpenAL)/' \
-            | grep -v -E '^engine/Random/randomGen\.cpp$' \
-            | grep -v -E '^engine/Poseidon/Foundation/(Algorithms/(Crc|Crc32)|Common/(ConsoleUtils_(posix|win)|GamePaths|Platform|PlatformPaths_(posix|win))|Enums/EnumNames|Framework/AppFrame|Strings/(Mbcs|StrFormat))\.cpp$' \
-            | grep -v -E '^tests/unit/apps/Server/test_simulate\.cpp$' \
-            | grep -v -E '^tests/unit/engine/Poseidon/Asset/Formats/P3D/test_p3d_header\.cpp$' \
-            | xargs clang-format --dry-run --Werror
+          .github/scripts/clang-format.sh --check

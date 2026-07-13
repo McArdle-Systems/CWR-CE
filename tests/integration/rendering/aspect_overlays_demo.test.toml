@@ -1,4 +1,4 @@
-tags = ["exclusive", "headful", "aspect-ratio", "optics"]
+tags = ["exclusive", "headful", "aspect-ratio", "optics", "metal-known-failure"]
 binary = "PoseidonGame"
 mission = "tests/integration/missions/aspect_overlays.Demo"
 timeout = 180

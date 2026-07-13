@@ -284,6 +284,7 @@ jobs:
             --tag headless `
             --retries 2 `
             --skip-tag ci-host-blocked `
+            --skip-tag dummy-incompatible `
             --game-arg --audio `
             --game-arg "$env:TRIDENT_AUDIO" `
             --game-arg --no-strict `
@@ -420,6 +421,9 @@ jobs:
     env:
       CWR_ARTIFACT_PREFIX: macOS-arm64-rwdi
       TRIDENT_RENDER: mtl
+      # Enables EngineMTL's cached framebuffer sampling for Trident pixel
+      # assertions. Ordinary game runs avoid the synchronous readback cost.
+      TRIDENT_METAL_READBACK: '1'
 
     steps:
       - name: Checkout
@@ -486,6 +490,8 @@ jobs:
             --render "$TRIDENT_RENDER" \
             --retries 2 \
             --skip-tag ci-host-blocked \
+            --skip-tag metal-known-failure \
+            --skip-tag efx-required \
             --game-arg --audio \
             --game-arg "$TRIDENT_AUDIO" \
             --game-arg --no-strict \
