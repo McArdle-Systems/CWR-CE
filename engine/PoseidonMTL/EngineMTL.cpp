@@ -295,12 +295,11 @@ int EngineMTL::SampleBackBufferNonBlack()
 
 bool EngineMTL::SamplePixel(int x, int y, uint8_t* outRGB)
 {
-    if (!_tridentReadback || outRGB == nullptr || _lastFrameRGB.empty() || x < 0 || y < 0 ||
-        x >= _lastFrameWidth || y >= _lastFrameHeight)
+    if (!_tridentReadback || outRGB == nullptr || _lastFrameRGB.empty() || x < 0 || y < 0 || x >= _lastFrameWidth ||
+        y >= _lastFrameHeight)
         return false;
 
-    const size_t offset =
-        (static_cast<size_t>(y) * static_cast<size_t>(_lastFrameWidth) + static_cast<size_t>(x)) * 3u;
+    const size_t offset = (static_cast<size_t>(y) * static_cast<size_t>(_lastFrameWidth) + static_cast<size_t>(x)) * 3u;
     outRGB[0] = _lastFrameRGB[offset];
     outRGB[1] = _lastFrameRGB[offset + 1];
     outRGB[2] = _lastFrameRGB[offset + 2];
