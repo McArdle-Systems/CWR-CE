@@ -19,8 +19,7 @@ std::string ReadTextFile(const std::filesystem::path& path)
 }
 } // namespace
 
-TEST_CASE("Metal cutouts preserve coverage without transparent depth writes",
-          "[Graphics][Metal][Alpha][Depth]")
+TEST_CASE("Metal cutouts preserve coverage without transparent depth writes", "[Graphics][Metal][Alpha][Depth]")
 {
     const std::filesystem::path repoRoot = std::filesystem::path(TESTS_ROOT_DIR).parent_path();
     const std::string metal = ReadTextFile(repoRoot / "engine" / "PoseidonMTL" / "EngineMTL.cpp");
@@ -46,9 +45,7 @@ TEST_CASE("Metal cutouts preserve coverage without transparent depth writes",
     REQUIRE(legacyPrepareRegion.find("!_legacyMeshUiOverlay && mip.IsOK()") != std::string::npos);
     REQUIRE(legacyPrepareRegion.find("_currentTriAlphaRef = 254;") != std::string::npos);
 
-
-    const std::string bootstrap =
-        ReadTextFile(repoRoot / "engine" / "PoseidonMTL" / "EngineMTLBootstrap.cpp");
+    const std::string bootstrap = ReadTextFile(repoRoot / "engine" / "PoseidonMTL" / "EngineMTLBootstrap.cpp");
     REQUIRE_FALSE(bootstrap.empty());
     const size_t blendShader = bootstrap.find("fragment float4 fsMeshBlend");
     REQUIRE(blendShader != std::string::npos);
@@ -71,8 +68,7 @@ TEST_CASE("Metal cutouts preserve coverage without transparent depth writes",
             std::string::npos);
     REQUIRE(bootstrap.find("measuredWorldCutout ? MTL::CullModeBack : MTL::CullModeNone") != std::string::npos);
 
-    const std::string textureMetal =
-        ReadTextFile(repoRoot / "engine" / "PoseidonMTL" / "TextureMTL.cpp");
+    const std::string textureMetal = ReadTextFile(repoRoot / "engine" / "PoseidonMTL" / "TextureMTL.cpp");
     REQUIRE_FALSE(textureMetal.empty());
     REQUIRE(textureMetal.find("decoded.pctPartial < 30.0") != std::string::npos);
     REQUIRE(bootstrap.find("state.alphaRef == 254 ? _impl->depthStateTLLess") != std::string::npos);
