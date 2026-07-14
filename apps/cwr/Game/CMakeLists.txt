@@ -146,6 +146,10 @@ if(POSEIDON_TARGET_IOS)
         MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
         XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
         XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "io.mcardle.cwr"
+        # Keep Xcode's authoritative device-family setting aligned with
+        # UIDeviceFamily in Info-iOS.plist.in. Without this, CMake generates
+        # TARGETED_DEVICE_FAMILY=1 and iPad runs the app as iPhone-only.
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
         XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/PoseidonGame.entitlements"
         # For Xcode archives, only the app bundle should be installable.
         # The project-wide App Store preset defaults generated targets to
