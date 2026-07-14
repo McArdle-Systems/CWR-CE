@@ -1,6 +1,6 @@
 name: TestFlight
 
-# Required GitHub Secrets (PROD environment) -- same shape as
+# Required GitHub Secrets (INTERNAL environment) -- same shape as
 # McArdle-Systems/Chanology's testflight.yml, adapted for this repo's own
 # app/team (the certificate and API key MAY be reused across apps under the
 # same Apple Developer Team, but the provisioning profile is bundle-ID
@@ -36,7 +36,7 @@ env:
 jobs:
   deploy:
     runs-on: [self-hosted, macOS, arm64]
-    environment: PROD
+    environment: INTERNAL
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     timeout-minutes: 30
 
