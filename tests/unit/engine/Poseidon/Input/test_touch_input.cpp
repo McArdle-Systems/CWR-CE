@@ -220,6 +220,40 @@ TEST_CASE("TouchInput: stationary held look finger does not repeat movement", "[
     CHECK(state.lookDy == Catch::Approx(0.0f));
 }
 
+TEST_CASE("TouchInput: gameplay aim accelerates only beyond 150 percent deflection", "[input][touch]")
+{
+    TouchFixture fixture;
+    TouchInput_TestSetGameplaySceneOverride(true, true);
+
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, 0.70f, 0.50f));
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_MOTION, 1, 0.82f, 0.50f));
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK(TouchInput_GetDebugState().lookDx == Catch::Approx(86.4f).margin(0.1f));
+
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_MOTION, 1, 0.95f, 0.50f));
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK(TouchInput_GetDebugState().lookDx > 150.0f);
+
+    TouchInput_ProcessFrame(1920, 1080);
+    const TouchInputDebugState held = TouchInput_GetDebugState();
+    CHECK(held.lookDx == Catch::Approx(0.0f));
+    CHECK(held.lookDy == Catch::Approx(0.0f));
+}
+
+TEST_CASE("TouchInput: inner gameplay aim deflection preserves stationary precision", "[input][touch]")
+{
+    TouchFixture fixture;
+    TouchInput_TestSetGameplaySceneOverride(true, true);
+
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, 0.70f, 0.50f));
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_MOTION, 1, 0.72f, 0.50f));
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK(TouchInput_GetDebugState().lookDx == Catch::Approx(14.4f).margin(0.1f));
+
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK(TouchInput_GetDebugState().lookDx == Catch::Approx(0.0f));
+}
+
 // GroupBarUnitsAtTouch (the commanding group-bar hit test) requires a live GWorld/AIGroup,
 // which this Input-layer unit test binary never sets up (GWorld stays null). A tap over
 // where the group bar would be must therefore keep falling back to the pre-existing

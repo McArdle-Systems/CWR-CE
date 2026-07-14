@@ -43,6 +43,10 @@ constexpr float kLowerRegionY = 0.30f;
 constexpr float kStickRadius = 0.115f;
 constexpr float kBaseLookScaleX = 720.0f;
 constexpr float kBaseLookScaleY = 520.0f;
+constexpr float kAimStickRadius = 0.115f;
+constexpr float kAimAccelerationStart = 1.5f;
+constexpr float kAimAccelerationFull = 3.0f;
+constexpr float kAimAccelerationMax = 5.0f;
 constexpr float kCursorStickScaleX = 22.0f;
 constexpr float kCursorStickScaleY = 22.0f;
 constexpr float kAimFocusDwellSeconds = 0.22f;
@@ -201,6 +205,10 @@ float sMoveThumbX = 0.18f;
 float sMoveThumbY = 0.74f;
 float sLookX = 0.0f;
 float sLookY = 0.0f;
+float sLookAnchorX = 0.0f;
+float sLookAnchorY = 0.0f;
+float sLookThumbX = 0.0f;
+float sLookThumbY = 0.0f;
 bool sAimFocusActive = false;
 bool sAimFocusCalm = false;
 Foundation::UITime sAimFocusCalmSince;
@@ -1747,8 +1755,25 @@ void TouchInput_ProcessFrame(int viewportWidth, int viewportHeight)
                 const float sensitivity = gameplay ? sAimSensitivity : sCursorSensitivity;
                 const float scaleX = gameplay ? kBaseLookScaleX : (float)std::max(1, sViewportW);
                 const float scaleY = gameplay ? kBaseLookScaleY : (float)std::max(1, sViewportH);
-                const float dx = (finger.x - finger.lastX) * scaleX * sensitivity;
-                const float dy = (finger.y - finger.lastY) * scaleY * sensitivity;
+                float dx = (finger.x - finger.lastX) * scaleX * sensitivity;
+                float dy = (finger.y - finger.lastY) * scaleY * sensitivity;
+                if (gameplay)
+                {
+                    // Preserve the original direct response through 150% of the visible
+                    // stick radius. Farther out, accelerate only the finger's actual motion;
+                    // holding at any deflection never continues turning on its own.
+                    const float stickX = finger.x - finger.startX;
+                    const float stickY = finger.y - finger.startY;
+                    const float deflection = Length(stickX, stickY) / kAimStickRadius;
+                    if (deflection > kAimAccelerationStart)
+                    {
+                        const float ramp = Clamp01((deflection - kAimAccelerationStart) /
+                                                   (kAimAccelerationFull - kAimAccelerationStart));
+                        const float multiplier = 1.0f + ramp * ramp * (kAimAccelerationMax - 1.0f);
+                        dx *= multiplier;
+                        dy *= multiplier;
+                    }
+                }
                 sLookDx += dx;
                 sLookDy += dy;
                 if (gameplay)
@@ -1771,6 +1796,10 @@ void TouchInput_ProcessFrame(int viewportWidth, int viewportHeight)
                         EndAimFocus();
                 }
             }
+            sLookAnchorX = finger.startX;
+            sLookAnchorY = finger.startY;
+            sLookThumbX = finger.x;
+            sLookThumbY = finger.y;
             sLookX = finger.x;
             sLookY = finger.y;
             lookActive = true;
@@ -1860,11 +1889,17 @@ void TouchInput_DrawOverlay(Engine* engine)
 
     if (std::fabs(sMoveX) > 0.001f || std::fabs(sMoveY) > 0.001f)
     {
-        DrawCircleApprox(engine, white, sMoveAnchorX, sMoveAnchorY, kStickRadius, base);
+        DrawCircleApprox(engine, white, sMoveAnchorX, sMoveAnchorY, kStickRadius,
+                         sMoveSprintActive ? sprintActive : base);
         DrawCircleApprox(engine, white, sMoveThumbX, sMoveThumbY, kStickRadius * 0.42f,
                          sMoveSprintActive ? sprintActive : active);
     }
-    if (std::fabs(sLookDx) > 0.001f || std::fabs(sLookDy) > 0.001f)
+    if (RoleActive(FingerRole::Look) && IsGameplayScene())
+    {
+        DrawCircleApprox(engine, white, sLookAnchorX, sLookAnchorY, kAimStickRadius, base);
+        DrawCircleApprox(engine, white, sLookThumbX, sLookThumbY, kAimStickRadius * 0.42f, active);
+    }
+    else if (std::fabs(sLookDx) > 0.001f || std::fabs(sLookDy) > 0.001f)
         DrawCircleApprox(engine, white, sLookX, sLookY, 0.035f, active);
 
     const int w = sViewportW > 0 ? sViewportW : engine->Width();
