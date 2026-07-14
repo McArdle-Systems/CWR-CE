@@ -359,21 +359,40 @@ static inline float4 applyDetailMode(float4 baseTex, float3 diffuseLit, float3 s
     return float4(diffuseLit + specLit, baseTex.a);
 }
 
+// Conventional binary-alpha boundary: samples above this are treated as the
+// solid body of a cutout (important for foliage), while lower filtered
+// coverage may be represented spatially (important for distant mesh fences).
+constant float kSolidCutoutCoverage = 0.5;
+
 // Opaque-pipeline fragment shader (blending disabled at the pipeline level,
 // pipelineStateTLOpaque) -- used for every section EXCEPT true Blend
 // (AlphaStats::Blend) ones, matching GL33's pass split: opaque+cutout
 // sections never reach a blend-enabled draw, so partial-alpha noise in
 // ordinary diffuse textures (e.g. ijeepmg.paa, ~7% genuinely partial texels)
-// can't make part of the model see-through. Cutout sections still alpha-test
-// (ref = 0xc0/255, same threshold BuildRenderPassDescriptor.hpp uses for
-// AlphaMode::Test on WorldCutout) so fences/foliage punch through cleanly.
+// can't make part of the model see-through. A fixed alpha cutoff cannot
+// preserve a cutout's mip-filtered coverage: a low cutoff turns distant mesh
+// fences solid, while a high cutoff makes them disappear. Instead, compare
+// faint alpha against a stable screen-space pattern. A 25%-coverage mip texel
+// then writes roughly one quarter of its pixels (and depth), preserving
+// apparent density without bringing back blended-alpha ordering artifacts.
+// Mostly opaque texels bypass the pattern so foliage bodies remain solid
+// instead of acquiring conspicuous screen-door holes.
 fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants& frame [[buffer(0)]],
                              texture2d<float> tex [[texture(0)]], texture2d<float> detailTex [[texture(1)]],
                              sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]])
 {
     float4 texColor = tex.sample(samp, in.uv);
-    if (in.isCutout > 0.5 && texColor.a < (192.0 / 255.0))
-        discard_fragment();
+    if (in.isCutout > 0.5)
+    {
+        float coverage = in.color.a * texColor.a;
+        if (coverage < kSolidCutoutCoverage)
+        {
+            float coverageThreshold = fract(52.9829189 * fract(dot(floor(in.position.xy),
+                                                                   float2(0.06711056, 0.00583715))));
+            if (coverage <= coverageThreshold)
+                discard_fragment();
+        }
+    }
     float3 diffuseLit = texColor.rgb * in.color.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, detailTex, detailSamp);
     float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
@@ -381,14 +400,23 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
 }
 
 // Blend-pipeline fragment shader (blending enabled, pipelineStateTLBlend) --
-// used only for true Blend (AlphaStats::Blend) sections, where texColor.a is
-// real per-pixel data (glass, fences seen through, smoke) and is meant to
-// paint back-to-front over whatever is already in the framebuffer.
+// used only for true Blend sections, deferred back-to-front. Measured cutouts
+// use fsMeshOpaque's coverage discard instead, so surviving pixels have
+// deterministic opaque color and depth.
 fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& frame [[buffer(0)]],
                             texture2d<float> tex [[texture(0)]], texture2d<float> detailTex [[texture(1)]],
                             sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]])
 {
     float4 texColor = tex.sample(samp, in.uv);
+    // Alpha-blended mesh sections still write depth, matching the legacy
+    // renderer. Never let their fully transparent texture background write
+    // an invisible depth rectangle: this is essential for antialiased
+    // cutout-like details such as tent ropes and perforated wreck parts.
+    // AI88 is currently expanded through ARGB4444, whose first non-zero
+    // alpha step is 17/255. Treat that lowest quantization step as clear; it
+    // is visually negligible but otherwise stamps depth around thin ropes.
+    if (in.color.a * texColor.a < (18.0 / 255.0))
+        discard_fragment();
     float3 diffuseLit = texColor.rgb * in.color.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, detailTex, detailSamp);
     float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
@@ -603,6 +631,7 @@ struct EngineMTLBootstrap::Impl
     // changes from Metal's default (0), this resets the shadow mask back to
     // a clean slate ahead of the next shadow draw, every frame.
     MTL::DepthStencilState* depthStateTL = nullptr;
+    MTL::DepthStencilState* depthStateTLLess = nullptr; // strict cutout depth: equal rear layers lose
     MTL::DepthStencilState* depthStateDisabled = nullptr;
     MTL::DepthStencilState* depthStateTLNoWrite = nullptr; // depth test on, write off -- NoZWrite sections (shadows)
     // Stencil EQUAL(ref=0)+INCREMENT(clamped), gated by the normal depth test
@@ -1093,6 +1122,14 @@ void EngineMTLBootstrap::EnsurePipeline()
     _impl->depthStateTL = _impl->device->newDepthStencilState(depthDescTL);
     depthDescTL->release();
 
+    MTL::DepthStencilDescriptor* depthDescTLLess = MTL::DepthStencilDescriptor::alloc()->init();
+    depthDescTLLess->setDepthCompareFunction(MTL::CompareFunctionLess);
+    depthDescTLLess->setDepthWriteEnabled(true);
+    depthDescTLLess->setFrontFaceStencil(stencilAlwaysReplaceZero);
+    depthDescTLLess->setBackFaceStencil(stencilAlwaysReplaceZero);
+    _impl->depthStateTLLess = _impl->device->newDepthStencilState(depthDescTLLess);
+    depthDescTLLess->release();
+
     MTL::DepthStencilDescriptor* depthDescOff = MTL::DepthStencilDescriptor::alloc()->init();
     depthDescOff->setDepthCompareFunction(MTL::CompareFunctionAlways);
     depthDescOff->setDepthWriteEnabled(false);
@@ -1456,7 +1493,7 @@ void EngineMTLBootstrap::FlushTriangles2D()
         if (state.depthMode == Poseidon::render::DepthMode::ReadOnly)
             depthState = _impl->depthStateTLNoWrite;
         else if (state.depthMode == Poseidon::render::DepthMode::Normal)
-            depthState = _impl->depthStateTL;
+            depthState = state.alphaRef == 254 ? _impl->depthStateTLLess : _impl->depthStateTL;
     }
     _impl->currentEncoder->setDepthStencilState(depthState);
     _impl->currentEncoder->setFragmentSamplerState(_impl->samplerStates[SamplerIndex(state.sampler)], 0);
@@ -1466,14 +1503,15 @@ void EngineMTLBootstrap::FlushTriangles2D()
     _impl->currentEncoder->setFragmentSamplerState(_impl->samplerStates[0], 1);
     SetDepthBiasForDescriptor(_impl->currentEncoder, state.surface,
                               isShadow ? Poseidon::render::ShaderFamily::Shadow : state.shader);
-    // The 3D mesh path (DrawIndexedTL) sets CullModeBack + WindingClockwise
-    // on this same encoder for closed-hull culling and never resets it --
-    // it's sticky state, not per-draw. 2D screen-space UI quads have no
-    // "back face" and their vertex winding isn't normalized against that
-    // convention (DrawLine's perpendicular-offset quads come out the
-    // opposite handedness from Draw2D's TL/TR/BR/BL rects for some
-    // orientations), so leftover backface culling silently drops them.
-    _impl->currentEncoder->setCullMode(MTL::CullModeNone);
+    // The measured world-cutout state is reserved by PrepareTriangle with
+    // alphaRef 254. Cull its back faces so the far/interior side of thin
+    // closed parts (notably the M113 wheels) cannot compete with the near
+    // face at almost identical depth. Control3D/UI pictures are explicitly
+    // excluded from that state and remain two-sided; their quads do not have
+    // a reliable winding convention.
+    const bool measuredWorldCutout = state.alphaRef == 254 && state.useDepth;
+    _impl->currentEncoder->setFrontFacingWinding(MTL::WindingClockwise);
+    _impl->currentEncoder->setCullMode(measuredWorldCutout ? MTL::CullModeBack : MTL::CullModeNone);
 
     // Clamp to the drawable -- Metal's setScissorRect raises a validation
     // error if the rect extends past the render target.
@@ -1827,11 +1865,12 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     //
     // Pipeline choice mirrors GL33's opaque-pass/BlendOnly-pass split:
     // BlendMode::AlphaBlend is true Blend-classified sections (AlphaStats::
-    // Blend's doc comment: "must be deferred to the back-to-front pass" and
-    // never occlude/write depth -- only Opaque/Cutout do); BlendMode::Shadow
-    // is the single-pass shadow scheme (see fsShadow's doc comment); anything
-    // else (Opaque, or a descriptor mode this path doesn't have a pipeline
-    // for yet) falls back to the no-blend Opaque/Cutout pipeline.
+    // Blend's doc comment: "must be deferred to the back-to-front pass"); its
+    // fragment shader discards clear texels before the descriptor-selected
+    // depth state is applied. BlendMode::Shadow is the single-pass shadow
+    // scheme (see fsShadow's doc comment); anything else (Opaque, or a
+    // descriptor mode this path doesn't have a pipeline for yet) falls back
+    // to the no-blend Opaque/Cutout pipeline.
     /// TODO: ShaderFamily::Water/Detail/Grass don't have a real pipeline yet -- see
     /// BuildRenderPassDescriptor.hpp. Anything that resolves to one of those
     /// today silently falls back to Opaque here instead of failing loudly.
@@ -1845,14 +1884,11 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     _impl->currentEncoder->setRenderPipelineState(pipeline);
 
     // Depth state: DepthMode::Shadow gets the stencil-exclusion state
-    // (depthStateShadow); ReadOnly (Blend sections, and NoZWrite sections
-    // such as the legacy spec's shadow-adjacent decals) gets depth-test-only;
-    // everything else (Normal, or a mode without a dedicated state yet) gets
-    // the ordinary test+write state. Multiple overlapping Blend panels on the
-    // same mesh (e.g. an M113/jeep wreck's several rust-holed body sections)
-    // each writing their own depth would z-fight against each other and let
-    // the interior show through unpredictably depending on draw/section
-    // order -- ReadOnly avoids that.
+    // (depthStateShadow); ReadOnly (explicit NoZWrite sections such as the
+    // legacy spec's shadow-adjacent decals) gets depth-test-only; everything
+    // else (Normal, or a mode without a dedicated state yet) gets the ordinary
+    // test+write state. fsMeshBlend discards clear texels before this state can
+    // write depth.
     MTL::DepthStencilState* depthState = _impl->depthStateTL;
     if (depthMode == Poseidon::render::DepthMode::Shadow)
         depthState = _impl->depthStateShadow;
@@ -2172,6 +2208,11 @@ void EngineMTLBootstrap::Shutdown()
     {
         _impl->depthStateTL->release();
         _impl->depthStateTL = nullptr;
+    }
+    if (_impl->depthStateTLLess != nullptr)
+    {
+        _impl->depthStateTLLess->release();
+        _impl->depthStateTLLess = nullptr;
     }
     if (_impl->depthStateDisabled != nullptr)
     {

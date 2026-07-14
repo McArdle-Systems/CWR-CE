@@ -29,7 +29,10 @@ AlphaStats::Kind ClassifyMetalAlpha(const AlphaStats& decoded)
     // occluding it. Keep genuinely partial surfaces (glass/smoke/fades) in
     // Blend, but route hole-heavy textures with limited partial edge pixels
     // through the cutout path.
-    if (decoded.pctClear >= 2.0 && decoded.pctPartial < 20.0)
+    // AI88 rope/fence art can devote roughly a quarter of its tiny texture to
+    // antialiased edge texels (stan_snura.paa is 16x32, ~25% partial). It is
+    // still a depth-resolved cutout, not a large translucent surface.
+    if (decoded.pctClear >= 2.0 && decoded.pctPartial < 30.0)
         return AlphaStats::Cutout;
     return decoded.kind;
 }
