@@ -565,6 +565,27 @@ void EngineMTL::PrepareTriangle(const MipInfo& mip, int specFlags)
     _currentTriShader = d.shader;
     _currentTriAlphaMode = d.alpha;
     _currentTriAlphaRef = d.alphaRef;
+    // Control3D pictures share this legacy fan path with software-transformed
+    // world models, but their source art commonly contains graded alpha used
+    // for row tinting/fades.  Reclassifying those pictures as the wheel's
+    // near-opaque cutout makes unselected thumbnails black until highlighted.
+    const bool measuredCutout =
+        !_legacyMeshUiOverlay && mip.IsOK() && mip._texture && mip._texture->IsTransparent();
+    if (measuredCutout)
+    {
+        // Legacy model flags only say "has alpha". The decoded texture class
+        // supplies the missing distinction: cutout holes discard, while the
+        // surviving wheel/foliage pixels write depth and occlude rear faces.
+        _currentTriDepthMode = d.depth;
+        _currentTriAlphaMode = render::AlphaMode::Test;
+        _currentTriAlphaRef = 254;
+    }
+    else if (d.blend == render::BlendMode::AlphaBlend)
+    {
+        // Genuine translucent legacy geometry tests opaque depth but does not
+        // create ordering-dependent depth between its own blended layers.
+        _currentTriDepthMode = render::DepthMode::ReadOnly;
+    }
     if (_legacyMeshUiOverlay && d.blend == render::BlendMode::AlphaBlend && d.fog == render::FogMode::AlphaFog)
         _currentTriDepthMode = render::DepthMode::ReadOnly;
 
@@ -839,12 +860,16 @@ void EngineMTL::PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& 
             d.blend == render::BlendMode::AlphaBlend &&
             (d.fog == render::FogMode::AlphaFog || render::Has(spec.backend, render::Backend::IsAlpha));
         const bool isBlend = !isCutout && (isAlpha || forceBlend);
+        // Measured cutouts stay in ShapeDraw's opaque/depth-resolved pass and
+        // use a real discard rather than alpha blending. Blending while also
+        // writing depth makes a rope look plausible against its own tent but
+        // leaves its partially transparent edge depth-occluding soldiers and
+        // weapons behind it. Genuine translucent surfaces remain blended.
         _tlSectionBlendMode = isBlend ? render::BlendMode::AlphaBlend : render::BlendMode::Opaque;
         // Match GL33/BuildRenderPassDescriptor: alpha/blend does not by
         // itself disable depth writes. Only NoZWrite/NoZBuf/shadow change
-        // depth mode. Turning every Blend texture into ReadOnly makes
-        // layered alpha surfaces inside one object bleed through each other
-        // (e.g. jeep steering wheel vs windscreen).
+        // depth mode. Measured cutouts were separated above; genuinely
+        // blended features still use their descriptor-selected depth mode.
         _tlSectionDepthMode = d.depth;
     }
 }

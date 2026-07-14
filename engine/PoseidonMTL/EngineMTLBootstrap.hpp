@@ -103,9 +103,9 @@ struct ObjectConstantsMTL
     float diffuse[4];
     float emissive[4];
     // x = 1.0 if the bound texture is AlphaStats::Cutout (Texture::IsAlpha()
-    // && !blend) -- fsMeshOpaque alpha-tests texColor.a against GL33's
-    // cutout ref (0xc0/255, see BuildRenderPassDescriptor.hpp) and discards
-    // below it. 0.0 for ordinary opaque textures (no discard at all) and for
+    // && !blend) -- fsMeshOpaque uses coverage discard so transparent holes
+    // cannot write depth while filtered cutouts retain their apparent density.
+    // 0.0 for ordinary opaque textures (no discard at all) and for
     // true Blend textures (those draw with fsMeshBlend instead, see
     // DrawSectionTL's blendEnabled parameter).
     // y = mesh detail mode: 0 normal, 1 detail, 2 grass. This drives the
