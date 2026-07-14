@@ -25,8 +25,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: testflight-main
-  cancel-in-progress: true
+  # Every manual dispatch is isolated for its full lifetime: neither an
+  # automatic main build nor another dispatch can supersede it. Automatic
+  # workflow_run uploads still collapse to the newest main build.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('testflight-manual-{0}', github.run_id) || 'testflight-main' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   CCACHE_BASEDIR: ${{ github.workspace }}
