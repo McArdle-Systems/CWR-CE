@@ -1871,7 +1871,20 @@ void AirplaneAuto::Simulate(float deltaT, SimulationImportance prec)
                 {
                     if (_pilotHelperDir)
                     {
-                        _rudderWanted = -changeHeading * invFlapEff;
+                        const float helperRudder = -changeHeading * invFlapEff;
+                        // Manual mouse-flight sets _rudderWanted from X/C
+                        // before arriving here. Preserve the right-stick
+                        // direction helper and add touch rudder on top instead
+                        // of replacing either control source.
+                        if (QIsManual())
+                        {
+                            _rudderWanted += helperRudder;
+                            saturate(_rudderWanted, -1, 1);
+                        }
+                        else
+                        {
+                            _rudderWanted = helperRudder;
+                        }
                     }
                     if (fabs(changeHeading) > H_PI / 4 && ModelSpeed().Z() < _pilotSpeed + 20)
                     {

@@ -637,10 +637,7 @@ void AirplaneAuto::KeyboardPilot(AIUnit* unit, float deltaT)
             mouseControl = true;
             // last input from mouse - use mouse controls
             const float manualRudder = input.GetAction(ctx, UAMoveLeft) - input.GetAction(ctx, UAMoveRight);
-            // The direction helper rewrites _rudderWanted later in airplane
-            // simulation. Suspend that rewrite while X/C (including touch
-            // left-stick yaw) is held, then restore assistance on release.
-            _pilotHelperDir = std::fabs(manualRudder) <= 0.001f;
+            _pilotHelperDir = true;
             _pilotHelperBankDive = true;
             _pilotHeading = atan2(_mouseDirWanted[0], _mouseDirWanted[2]);
             // Mouse/touch flight owns pitch and roll through the aiming
