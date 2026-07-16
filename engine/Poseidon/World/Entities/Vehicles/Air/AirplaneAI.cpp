@@ -598,9 +598,7 @@ void AirplaneAuto::KeyboardPilot(AIUnit* unit, float deltaT)
 
     CancelStop();
 
-    const bool joystickControl = input.IsJoystickActive();
-    bool mouseControl = false;
-    if (joystickControl)
+    if (input.IsJoystickActive())
     {
         JoystickDirPilot(deltaT);
     }
@@ -634,7 +632,6 @@ void AirplaneAuto::KeyboardPilot(AIUnit* unit, float deltaT)
         bool internalCamera = IsGunner(GWorld->GetCameraType());
         if (internalCamera && input.IsMouseTurnActive() && !input.IsLookAroundEnabled())
         {
-            mouseControl = true;
             // last input from mouse - use mouse controls
             const float manualRudder = input.GetAction(ctx, UAMoveLeft) - input.GetAction(ctx, UAMoveRight);
             _pilotHelperDir = true;
@@ -741,24 +738,6 @@ void AirplaneAuto::KeyboardPilot(AIUnit* unit, float deltaT)
         _planeState = Takeoff;
     }
 
-    float touchX = 0.0f;
-    float touchY = 0.0f;
-    input.GetSyntheticLeftStick(touchX, touchY);
-    if (std::fabs(touchX) > 0.05f)
-    {
-        static DWORD nextTouchRudderLog = 0;
-        const DWORD now = GlobalTickCount();
-        if (now >= nextTouchRudderLog)
-        {
-            nextTouchRudderLog = now + 500;
-            LOG_INFO(Input,
-                     "TOUCH PLANE RUDDER: touchX={:.3f} touchY={:.3f} moveLeft={:.3f} moveRight={:.3f} "
-                     "stickRudder={:.3f} rudderWanted={:.3f} branch={}",
-                     touchX, touchY, input.GetAction(ctx, UAMoveLeft), input.GetAction(ctx, UAMoveRight),
-                     input.GetStickRudder(), _rudderWanted,
-                     joystickControl ? "joystick" : (mouseControl ? "mouse-flight" : "keyboard-flight"));
-        }
-    }
 }
 
 class Vector3Path
