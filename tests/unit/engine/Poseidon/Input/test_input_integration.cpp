@@ -604,6 +604,10 @@ TEST_CASE("InputSubsystem synthetic left stick uses aircraft-specific controls",
     CHECK(sub.GetAction(InputContext::PlanePilot, UAMoveLeft) == Catch::Approx(0.7f));
     CHECK(sub.GetAction(InputContext::PlanePilot, UATurnLeft) == Catch::Approx(0.0f));
     CHECK(sub.GetAction(InputContext::PlanePilot, UAMoveForward) == Catch::Approx(0.8f));
+    const InputContext savedContext = sub.GetContext();
+    sub.SetContext(InputContext::PlanePilot);
+    CHECK(sub.GetStickRudder() == Catch::Approx(-0.7f));
+    sub.SetContext(savedContext);
 
     CHECK(sub.GetAction(InputContext::HeliPilot, UATurnLeft) == Catch::Approx(0.7f));
     CHECK(sub.GetAction(InputContext::HeliPilot, UAMoveUp) == Catch::Approx(0.8f));

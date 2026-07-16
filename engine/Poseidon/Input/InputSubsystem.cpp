@@ -952,7 +952,16 @@ float InputSubsystem::GetStickThrust() const
 }
 float InputSubsystem::GetStickRudder() const
 {
-    return GetAction(UAAxisRudder, true);
+    const float legacyAxis = GetAction(UAAxisRudder, true);
+    if (std::fabs(legacyAxis) > 0.001f)
+        return legacyAxis;
+
+    // Touch supplies plane yaw through the keyboard-style X/C actions rather
+    // than a physical controller's dedicated rudder axis.  Airplane joystick
+    // control negates this return value, hence right-minus-left here.
+    if (context_ == InputContext::PlanePilot)
+        return GetAction(UAMoveRight, true) - GetAction(UAMoveLeft, true);
+    return 0.0f;
 }
 
 void InputSubsystem::ChangeGameFocus(int add)
