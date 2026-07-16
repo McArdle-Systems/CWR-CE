@@ -52,6 +52,21 @@ and follow the instructions for [setting up
 vcpkg](https://learn.microsoft.com/en-us/vcpkg/get_started/get-started?pivots=shell-powershell)
 to get the required software.
 
+### Formatting hook
+
+Enable the repository's pre-push hook once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The hook uses the clang-format major version pinned in
+`.clang-format-version`. It automatically selects a matching versioned,
+Homebrew, or system LLVM installation. If formatting changes any files, the
+push stops so you can review and commit them; pushing again then proceeds.
+CI runs the same formatter and remains the backstop for pushes made without
+the local hook.
+
 ### Compiling
 
 ```sh

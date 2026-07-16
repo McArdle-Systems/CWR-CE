@@ -1,6 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(git rev-parse --show-toplevel)"
+required_version="$(tr -d '[:space:]' < "$repo_root/.clang-format-version")"
+if [[ ! "$required_version" =~ ^[0-9]+$ ]]; then
+  echo "invalid clang-format version in .clang-format-version: '$required_version'" >&2
+  exit 2
+fi
+
+formatter="${CLANG_FORMAT:-}"
+if [[ -z "$formatter" ]] && command -v "clang-format-$required_version" >/dev/null 2>&1; then
+  formatter="clang-format-$required_version"
+elif [[ -z "$formatter" ]] && command -v brew >/dev/null 2>&1; then
+  brew_llvm_prefix="$(brew --prefix "llvm@$required_version" 2>/dev/null || true)"
+  if [[ -x "$brew_llvm_prefix/bin/clang-format" ]]; then
+    formatter="$brew_llvm_prefix/bin/clang-format"
+  fi
+fi
+if [[ -z "$formatter" ]] && [[ -x "/usr/lib/llvm-$required_version/bin/clang-format" ]]; then
+  formatter="/usr/lib/llvm-$required_version/bin/clang-format"
+elif [[ -z "$formatter" ]] && command -v clang-format >/dev/null 2>&1; then
+  formatter="clang-format"
+fi
+
+if [[ -z "$formatter" ]]; then
+  echo "clang-format $required_version is required but was not found on PATH" >&2
+  exit 127
+fi
+
+version_output="$($formatter --version)"
+installed_version="$(sed -nE 's/.*[Vv]ersion ([0-9]+).*/\1/p' <<< "$version_output")"
+if [[ "$installed_version" != "$required_version" ]]; then
+  echo "clang-format $required_version is required; '$formatter' reports: $version_output" >&2
+  exit 2
+fi
+
 mode="${1:---check}"
 case "$mode" in
   --check)
@@ -40,5 +74,5 @@ done < <(
 )
 
 if ((${#files[@]} > 0)); then
-  clang-format "${format_args[@]}" "${files[@]}"
+  "$formatter" "${format_args[@]}" "${files[@]}"
 fi

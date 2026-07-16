@@ -1704,14 +1704,14 @@ void GameApplication::StartGameMode()
         }
         else if (Benchmark)
         {
-            // Prefer the active game-data mission, matching the load/editor
-            // menu's relative "missions/" lookup. This matters on iOS, where
-            // -C points at <UserContentDir>/GameData while MissionsDir() points
-            // at the sibling user-content folder and may contain an older
-            // benchmark copy. Keep MissionsDir() as a desktop/user-mission
-            // fallback for installs without a packaged benchmark.
-            const std::string activeBenchmarkPath = "missions/benchmark.abel/mission.sqm";
-            const std::string userBenchmarkPath = GamePaths::Instance().MissionsDir() + "benchmark.abel/mission.sqm";
+            // Prefer the benchmark in the active game data, matching the
+            // editor's relative "missions/" lookup. Keep the user-content
+            // mission as a fallback for installs without a packaged copy.
+            // Preserve the island's canonical casing. iOS uses a case-sensitive
+            // filesystem, and the editor names this directory benchmark.Abel.
+            const std::string activeBenchmarkPath = "missions/benchmark.Abel/mission.sqm";
+            const std::string userBenchmarkPath = GamePaths::Instance().MissionsDir() + "benchmark.Abel/mission.sqm";
+
             auto loadPath = MissionPathLoader::Loader::ResolveMissionFile(activeBenchmarkPath);
             if (!loadPath)
                 loadPath = MissionPathLoader::Loader::ResolveMissionFile(userBenchmarkPath);
