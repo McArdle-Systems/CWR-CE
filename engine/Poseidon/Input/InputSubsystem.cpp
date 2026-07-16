@@ -952,6 +952,13 @@ float InputSubsystem::GetStickThrust() const
 }
 float InputSubsystem::GetStickRudder() const
 {
+    // Active plane touch yaw must win over the hardware rudder slot. SDL's
+    // trigger/rudder axis can retain a small non-zero value even with no
+    // controller input, which previously prevented the X/C fallback below
+    // from ever being reached.
+    if (context_ == InputContext::PlanePilot && std::fabs(syntheticLeftStickX_) > 0.001f)
+        return syntheticLeftStickX_;
+
     const float legacyAxis = GetAction(UAAxisRudder, true);
     if (std::fabs(legacyAxis) > 0.001f)
         return legacyAxis;
