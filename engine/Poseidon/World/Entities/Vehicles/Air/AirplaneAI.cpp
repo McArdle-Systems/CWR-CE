@@ -737,7 +737,6 @@ void AirplaneAuto::KeyboardPilot(AIUnit* unit, float deltaT)
     {
         _planeState = Takeoff;
     }
-
 }
 
 class Vector3Path
