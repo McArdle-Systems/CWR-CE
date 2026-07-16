@@ -1456,7 +1456,8 @@ void InputSubsystem::SetSyntheticLeftStick(float x, float y)
     constexpr float kCommandEdgeThreshold = 0.20f;
     const float nextX = std::clamp(x, -1.0f, 1.0f);
     const float nextY = std::clamp(y, -1.0f, 1.0f);
-    const auto queueEdge = [&](UserAction action, float previous, float next) {
+    const auto queueEdge = [&](UserAction action, float previous, float next)
+    {
         if (previous <= kCommandEdgeThreshold && next > kCommandEdgeThreshold)
             syntheticAxisActionToDo_[action] = true;
     };
