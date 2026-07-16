@@ -1711,8 +1711,7 @@ void GameApplication::StartGameMode()
             // benchmark copy. Keep MissionsDir() as a desktop/user-mission
             // fallback for installs without a packaged benchmark.
             const std::string activeBenchmarkPath = "missions/benchmark.abel/mission.sqm";
-            const std::string userBenchmarkPath =
-                GamePaths::Instance().MissionsDir() + "benchmark.abel/mission.sqm";
+            const std::string userBenchmarkPath = GamePaths::Instance().MissionsDir() + "benchmark.abel/mission.sqm";
             auto loadPath = MissionPathLoader::Loader::ResolveMissionFile(activeBenchmarkPath);
             if (!loadPath)
                 loadPath = MissionPathLoader::Loader::ResolveMissionFile(userBenchmarkPath);
