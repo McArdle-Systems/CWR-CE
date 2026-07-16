@@ -324,7 +324,7 @@ void AppConfig::ParseCommandLine(int argc, char** argv)
 #ifdef __APPLE__
         showOption(
             displayGroup
-                ->add_option("--render", _renderBackend, "Graphics backend: dummy, gl33, mtl, auto (default: gl33)")
+                ->add_option("--render", _renderBackend, "Graphics backend: dummy, gl33, mtl, auto (default: mtl)")
                 ->check(CLI::IsMember({"dummy", "gl33", "mtl", "auto"})),
             CliHelpVisibility::Full);
 #else
