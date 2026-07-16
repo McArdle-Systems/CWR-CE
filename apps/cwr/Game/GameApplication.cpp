@@ -1704,16 +1704,18 @@ void GameApplication::StartGameMode()
         }
         else if (Benchmark)
         {
-            // Originally a path relative to the game install dir
-            // (Users\Test\Missions\Benchmark.Abel\mission.sqm) -- this port
-            // moved user/editor missions to GamePaths::MissionsDir()
-            // (<UserContentDir>/missions/, lowercase), so that hardcoded
-            // path never resolved here; -benchmark silently fell through to
-            // the normal menu instead of erroring. Mission folder name on
-            // disk is lowercase ("benchmark.abel"), matching the editor's
-            // own casing convention for this directory.
-            const std::string benchmarkPath = GamePaths::Instance().MissionsDir() + "benchmark.abel/mission.sqm";
-            const auto loadPath = MissionPathLoader::Loader::ResolveMissionFile(benchmarkPath);
+            // Prefer the active game-data mission, matching the load/editor
+            // menu's relative "missions/" lookup. This matters on iOS, where
+            // -C points at <UserContentDir>/GameData while MissionsDir() points
+            // at the sibling user-content folder and may contain an older
+            // benchmark copy. Keep MissionsDir() as a desktop/user-mission
+            // fallback for installs without a packaged benchmark.
+            const std::string activeBenchmarkPath = "missions/benchmark.abel/mission.sqm";
+            const std::string userBenchmarkPath =
+                GamePaths::Instance().MissionsDir() + "benchmark.abel/mission.sqm";
+            auto loadPath = MissionPathLoader::Loader::ResolveMissionFile(activeBenchmarkPath);
+            if (!loadPath)
+                loadPath = MissionPathLoader::Loader::ResolveMissionFile(userBenchmarkPath);
             if (loadPath)
             {
                 strncpy(LoadFile, loadPath->c_str(), sizeof(LoadFile) - 1);
@@ -1722,8 +1724,8 @@ void GameApplication::StartGameMode()
             }
             else
             {
-                LOG_ERROR(Core, "Benchmark mission not found at '{}' -- falling back to the normal menu",
-                          benchmarkPath);
+                LOG_ERROR(Core, "Benchmark mission not found at '{}' or '{}' -- falling back to the normal menu",
+                          activeBenchmarkPath, userBenchmarkPath);
             }
         }
         if (AppConfig::Instance().IsViewerMode())
