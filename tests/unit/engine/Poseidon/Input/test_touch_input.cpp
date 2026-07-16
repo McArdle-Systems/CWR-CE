@@ -299,6 +299,23 @@ TEST_CASE("TouchInput: command-menu tap without a live world falls back to prima
     CHECK(GInput.mouse.buttonsToDo[0]);
 }
 
+TEST_CASE("TouchInput: vehicle gameplay tap uses target secondary click", "[input][touch]")
+{
+    TouchFixture fixture;
+    auto& input = InputSubsystem::Instance();
+    const InputContext savedContext = input.GetContext();
+    input.SetContext(InputContext::PlanePilot);
+    TouchInput_TestSetGameplaySceneOverride(true, true);
+
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, 0.70f, 0.50f));
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_UP, 1, 0.70f, 0.50f));
+    GInput.mouse.Update(GInput.cursor, 0, false, Glob.uiTime, nullptr);
+
+    CHECK_FALSE(GInput.mouse.buttonsToDo[0]);
+    CHECK(GInput.mouse.buttonsToDo[1]);
+    input.SetContext(savedContext);
+}
+
 TEST_CASE("TouchInput: long gameplay look hold does not fire on release", "[input][touch]")
 {
     TouchFixture fixture;

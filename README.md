@@ -177,14 +177,20 @@ default only for iOS builds, and feeds the existing input/controller UI paths.
 Current behavior:
 
 - Left virtual stick drives movement in gameplay and cursor movement in views
-  that still use cursor-style navigation.
+  that still use cursor-style navigation. Vehicle controls are context-aware:
+  planes use left/right for rudder and up/down for throttle; helicopters use
+  left/right for bank and up/down for collective.
 - Vehicle forward/back is bridged from the left stick so touch up/down behaves
-  like keyboard throttle/brake in driver contexts.
+  like keyboard throttle/brake in ordinary driver contexts. Tank commanders
+  receive discrete forward, reverse, left, and right movement orders; full
+  forward deflection issues the fast order, while Stance issues slow forward.
 - Right-side drag controls aim/look in gameplay.
-- Right-side tap, when not on another touch button, performs a fire/primary
-  click action.
-- Touch buttons currently cover Fire, Action, Reload, Optics/Zoom, Map, and
-  Pause/Escape.
+- Right-side tap, when not on another touch button, performs fire/primary click
+  on foot and target/secondary click while in a vehicle.
+- Touch buttons currently cover Fire, Action, Reload, Optics/Zoom, Stance,
+  Equipment, person view, weapon cycling, and Pause/Escape. The Equipment
+  radial provides the command menu, map, compass, watch, binoculars, and night
+  vision when available.
 - Menu-like screens, pause/options views, editor dialogs, and modal dialogs
   support direct tap/drag on existing UI controls.
 - Map controls support one-finger primary interaction for taps, selection, and
@@ -193,6 +199,8 @@ Current behavior:
   never commits by itself; dragging up/down while held scrolls the action menu,
   and release after scrolling or dragging does not execute the highlighted
   action.
+- Command-bar unit icons and numbered command-menu entries support direct taps;
+  a combined vehicle-crew icon selects every unit represented by that icon.
 - `Options > Controls > Touch Controls` exposes aim sensitivity and cursor
   movement sensitivity; values are saved to `touch.cfg`. Cursor sensitivity uses
   a curved slider so low speeds have more usable adjustment range.
@@ -204,9 +212,8 @@ Known touch-control issues:
   active and near the screen edge, but the overlay visuals are incomplete there.
 - Action-menu flick velocity is not tuned yet; current scrolling is based on
   hold-and-drag distance.
-- Command bar unit selection and command-menu options are not tappable yet.
-- Overlay polish, full vehicle/aircraft parity, and advanced editor gestures are
-  still work in progress.
+- Overlay polish, vehicle-control tuning, and advanced editor gestures are still
+  work in progress.
 
 For device debugging, the iOS app currently injects `--no-splash --show-fps`
 when those options are not supplied, keeps stdout/stderr attached to the Xcode or

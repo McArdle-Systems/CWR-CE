@@ -627,7 +627,9 @@ float InputSubsystem::GetAction(InputContext ctx, UserAction action, bool checkF
     // (infantry, custom bindings), QueryProfileAction has already included it.
     if (checkFocus && GInput.gameFocusLost > 0)
         return value;
-    if ((action == UAMoveForward || action == UAMoveBack) && syntheticLeftStickY_ != 0.0f &&
+    const bool helicopterPilot = ctx == InputContext::HeliPilot;
+    const bool planePilot = ctx == InputContext::PlanePilot;
+    if (!helicopterPilot && (action == UAMoveForward || action == UAMoveBack) && syntheticLeftStickY_ != 0.0f &&
         !ActionHasGamepadAxisBinding(profile, action, 1))
     {
         if (action == UAMoveForward)
@@ -635,10 +637,26 @@ float InputSubsystem::GetAction(InputContext ctx, UserAction action, bool checkF
         else
             value += std::max(0.0f, syntheticLeftStickY_);
     }
-    if ((action == UATurnLeft || action == UATurnRight) && syntheticLeftStickX_ != 0.0f &&
+    if (helicopterPilot && (action == UAMoveUp || action == UAMoveDown) && syntheticLeftStickY_ != 0.0f &&
+        !ActionHasGamepadAxisBinding(profile, action, 1))
+    {
+        if (action == UAMoveUp)
+            value += std::max(0.0f, -syntheticLeftStickY_);
+        else
+            value += std::max(0.0f, syntheticLeftStickY_);
+    }
+    if (!planePilot && (action == UATurnLeft || action == UATurnRight) && syntheticLeftStickX_ != 0.0f &&
         !ActionHasGamepadAxisBinding(profile, action, 0))
     {
         if (action == UATurnLeft)
+            value += std::max(0.0f, -syntheticLeftStickX_);
+        else
+            value += std::max(0.0f, syntheticLeftStickX_);
+    }
+    if (planePilot && (action == UAMoveLeft || action == UAMoveRight) && syntheticLeftStickX_ != 0.0f &&
+        !ActionHasGamepadAxisBinding(profile, action, 0))
+    {
+        if (action == UAMoveLeft)
             value += std::max(0.0f, -syntheticLeftStickX_);
         else
             value += std::max(0.0f, syntheticLeftStickX_);
@@ -654,7 +672,12 @@ bool InputSubsystem::GetActionToDo(UserAction action, bool reset, bool checkFocu
     const int idx = static_cast<int>(context_);
     if (idx < 0 || idx >= kNumContexts)
         return false;
-    return QueryProfileActionToDo(GInput, profiles_[idx], action, actionDoneByContext_[idx][action], reset, checkFocus);
+    const bool profileToDo =
+        QueryProfileActionToDo(GInput, profiles_[idx], action, actionDoneByContext_[idx][action], reset, checkFocus);
+    const bool syntheticToDo = (!checkFocus || GInput.gameFocusLost <= 0) && syntheticAxisActionToDo_[action];
+    if (reset && syntheticToDo)
+        syntheticAxisActionToDo_[action] = false;
+    return profileToDo || syntheticToDo;
 }
 
 bool InputSubsystem::IsKeyDown(SDL_Scancode sc) const
@@ -1430,8 +1453,31 @@ void InputSubsystem::SetSyntheticStickPov(int i, bool value)
 }
 void InputSubsystem::SetSyntheticLeftStick(float x, float y)
 {
-    syntheticLeftStickX_ = std::clamp(x, -1.0f, 1.0f);
-    syntheticLeftStickY_ = std::clamp(y, -1.0f, 1.0f);
+    constexpr float kCommandEdgeThreshold = 0.20f;
+    const float nextX = std::clamp(x, -1.0f, 1.0f);
+    const float nextY = std::clamp(y, -1.0f, 1.0f);
+    const auto queueEdge = [&](UserAction action, float previous, float next) {
+        if (previous <= kCommandEdgeThreshold && next > kCommandEdgeThreshold)
+            syntheticAxisActionToDo_[action] = true;
+    };
+    if (context_ == InputContext::Gunner)
+    {
+        queueEdge(UATurnLeft, -syntheticLeftStickX_, -nextX);
+        queueEdge(UATurnRight, syntheticLeftStickX_, nextX);
+        queueEdge(UAMoveForward, -syntheticLeftStickY_, -nextY);
+        queueEdge(UAMoveBack, syntheticLeftStickY_, nextY);
+    }
+    else
+    {
+        syntheticAxisActionToDo_[UATurnLeft] = false;
+        syntheticAxisActionToDo_[UATurnRight] = false;
+        syntheticAxisActionToDo_[UAMoveForward] = false;
+        syntheticAxisActionToDo_[UAMoveBack] = false;
+        syntheticAxisActionToDo_[UAMoveFastForward] = false;
+    }
+
+    syntheticLeftStickX_ = nextX;
+    syntheticLeftStickY_ = nextY;
 
     const float values[2] = {syntheticLeftStickX_, syntheticLeftStickY_};
     for (int i = 0; i < 2; i++)
@@ -1447,6 +1493,8 @@ void InputSubsystem::SetSyntheticLeftStick(float x, float y)
 }
 void InputSubsystem::SetSyntheticTurbo(bool active)
 {
+    if (context_ == InputContext::Gunner && active && !syntheticTurbo_ && syntheticLeftStickY_ < -0.2f)
+        syntheticAxisActionToDo_[UAMoveFastForward] = true;
     syntheticTurbo_ = active;
 }
 bool InputSubsystem::HasSyntheticStickInput() const

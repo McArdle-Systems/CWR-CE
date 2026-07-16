@@ -594,6 +594,61 @@ TEST_CASE("InputSubsystem synthetic left stick drives vehicle forward and back a
     sub.SetSyntheticLeftStick(0.0f, 0.0f);
 }
 
+TEST_CASE("InputSubsystem synthetic left stick uses aircraft-specific controls", "[input][integration]")
+{
+    auto& sub = InputSubsystem::Instance();
+    sub.LoadDefaultProfiles();
+    sub.SetSyntheticLeftStick(-0.7f, -0.8f);
+    GInput.gameFocusLost = 0;
+
+    CHECK(sub.GetAction(InputContext::PlanePilot, UAMoveLeft) == Catch::Approx(0.7f));
+    CHECK(sub.GetAction(InputContext::PlanePilot, UATurnLeft) == Catch::Approx(0.0f));
+    CHECK(sub.GetAction(InputContext::PlanePilot, UAMoveForward) == Catch::Approx(0.8f));
+
+    CHECK(sub.GetAction(InputContext::HeliPilot, UATurnLeft) == Catch::Approx(0.7f));
+    CHECK(sub.GetAction(InputContext::HeliPilot, UAMoveUp) == Catch::Approx(0.8f));
+    CHECK(sub.GetAction(InputContext::HeliPilot, UAMoveForward) == Catch::Approx(0.0f));
+
+    sub.SetSyntheticLeftStick(0.0f, 0.0f);
+}
+
+TEST_CASE("InputSubsystem synthetic left stick emits commander movement edges", "[input][integration]")
+{
+    auto& sub = InputSubsystem::Instance();
+    const InputContext savedContext = sub.GetContext();
+    sub.LoadDefaultProfiles();
+    sub.SetContext(InputContext::Gunner);
+    sub.SetSyntheticLeftStick(0.0f, 0.0f);
+    GInput.gameFocusLost = 0;
+
+    sub.SetSyntheticLeftStick(-0.8f, -0.7f);
+    CHECK(sub.GetActionToDo(UATurnLeft));
+    CHECK(sub.GetActionToDo(UAMoveForward));
+    CHECK_FALSE(sub.GetActionToDo(UATurnLeft));
+    CHECK_FALSE(sub.GetActionToDo(UAMoveForward));
+
+    // Holding the stick does not repeat the discrete commander command.
+    sub.SetSyntheticLeftStick(-0.8f, -0.7f);
+    CHECK_FALSE(sub.GetActionToDo(UATurnLeft));
+    CHECK_FALSE(sub.GetActionToDo(UAMoveForward));
+
+    sub.SetSyntheticLeftStick(0.0f, 0.0f);
+    sub.SetSyntheticLeftStick(0.8f, 0.7f);
+    CHECK(sub.GetActionToDo(UATurnRight));
+    CHECK(sub.GetActionToDo(UAMoveBack));
+
+    sub.SetSyntheticLeftStick(0.0f, 0.0f);
+    sub.SetSyntheticTurbo(false);
+    sub.SetSyntheticLeftStick(0.0f, -1.0f);
+    sub.SetSyntheticTurbo(true);
+    CHECK(sub.GetActionToDo(UAMoveFastForward));
+    CHECK_FALSE(sub.GetActionToDo(UAMoveFastForward));
+
+    sub.SetSyntheticTurbo(false);
+    sub.SetSyntheticLeftStick(0.0f, 0.0f);
+    sub.SetContext(savedContext);
+}
+
 TEST_CASE("InputSubsystem synthetic left stick does not double count infantry left-Y bindings", "[input][integration]")
 {
     auto& sub = InputSubsystem::Instance();

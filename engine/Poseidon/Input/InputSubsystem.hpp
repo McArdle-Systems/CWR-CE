@@ -268,6 +268,7 @@ class InputSubsystem
     bool syntheticStickPov_[8] = {};
     float syntheticLeftStickX_ = 0.0f;
     float syntheticLeftStickY_ = 0.0f;
+    bool syntheticAxisActionToDo_[UAN] = {};
     bool syntheticTurbo_ = false;
 };
 } // namespace Poseidon
