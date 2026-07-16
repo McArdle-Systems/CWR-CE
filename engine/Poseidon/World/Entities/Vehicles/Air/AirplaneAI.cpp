@@ -636,7 +636,11 @@ void AirplaneAuto::KeyboardPilot(AIUnit* unit, float deltaT)
             _pilotHelperDir = true;
             _pilotHelperBankDive = true;
             _pilotHeading = atan2(_mouseDirWanted[0], _mouseDirWanted[2]);
-            _rudderWanted = 0;
+            // Mouse/touch flight owns pitch and roll through the aiming
+            // reticle, but X/C remains an independent rudder axis.  Clearing
+            // it here made the touch left stick appear correctly bound while
+            // yaw did nothing whenever the right-side flight stick was active.
+            _rudderWanted = input.GetAction(ctx, UAMoveLeft) - input.GetAction(ctx, UAMoveRight);
             // dive controlled directly
             _pilotDive = _mouseDirWanted[1];
         }
