@@ -513,6 +513,33 @@ void EmitPrimaryClick()
     SDLInput_BufferMouseButton(0, false);
 }
 
+bool IsVehicleInputContext(InputContext context)
+{
+    switch (context)
+    {
+        case InputContext::CarDriver:
+        case InputContext::TankDriver:
+        case InputContext::TankGunner:
+        case InputContext::HeliPilot:
+        case InputContext::PlanePilot:
+        case InputContext::ShipDriver:
+        case InputContext::Gunner:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void EmitGameplayTap()
+{
+    // Secondary mouse is the existing LockTarget/RevealTarget binding.  Keep
+    // the historical primary-click/fire tap on foot, but make an unoccupied
+    // gameplay tap select/reveal targets in every vehicle seat.
+    const int button = IsVehicleInputContext(InputSubsystem::Instance().GetContext()) ? 1 : 0;
+    SDLInput_BufferMouseButton(button, true);
+    SDLInput_BufferMouseButton(button, false);
+}
+
 void EmitGroupSelectTap(const Finger& finger)
 {
     if (!GWorld || !GWorld->GetUI())
@@ -1638,7 +1665,7 @@ void TouchInput_HandleFingerEvent(const SDL_TouchFingerEvent& event)
         ReleaseDirectTouchFinger(*finger);
         const bool quickTap = Glob.uiTime - finger->startTime <= kTapMaxSeconds;
         if (finger->role == FingerRole::Look && finger->maxTravel <= kTapMaxTravel && quickTap && IsGameplayScene())
-            EmitPrimaryClick();
+            EmitGameplayTap();
         if (finger->role == FingerRole::GroupSelect && finger->maxTravel <= kTapMaxTravel && quickTap)
             EmitGroupSelectTap(*finger);
         if (finger->role == FingerRole::CommandMenuSelect && finger->maxTravel <= kTapMaxTravel && quickTap)
@@ -1821,9 +1848,10 @@ void TouchInput_ProcessFrame(int viewportWidth, int viewportHeight)
         float syntheticMoveY = sMoveY;
         if (std::fabs(sMoveX) > 0.35f && std::fabs(sMoveY) < std::fabs(sMoveX) * kTouchStrafeSnapRatio)
             syntheticMoveY = 0.0f;
-        InputSubsystem::Instance().SetSyntheticLeftStick(sMoveX, syntheticMoveY);
+        auto& input = InputSubsystem::Instance();
+        input.SetSyntheticLeftStick(sMoveX, syntheticMoveY);
         sMoveSprintActive = moveActive && Length(sMoveX, sMoveY) > kSprintDeflectionThreshold;
-        InputSubsystem::Instance().SetSyntheticTurbo(sMoveSprintActive);
+        input.SetSyntheticTurbo(sMoveSprintActive);
         if (moveActive)
         {
             GInput.gamepad.moveLastActive = Glob.uiTime;
