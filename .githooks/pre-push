@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+.github/scripts/clang-format.sh --fix
+
+if ! git diff --quiet; then
+  echo "clang-format changed files." >&2
+  echo "Review and commit the formatting changes, then push again." >&2
+  exit 1
+fi

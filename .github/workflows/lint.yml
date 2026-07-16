@@ -27,10 +27,14 @@ jobs:
           # synthetic pull-request merge ref checked out by default.
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || github.ref }}
 
+      - name: Read clang-format version
+        id: clang-format-version
+        run: echo "version=$(tr -d '[:space:]' < .clang-format-version)" >> "$GITHUB_OUTPUT"
+
       - name: Setup LLVM and Clang
         uses: KyleMayes/install-llvm-action@v2
         with:
-          version: '21'
+          version: ${{ steps.clang-format-version.outputs.version }}
           arch: 'x64'
 
       - name: Auto-format same-repository pull requests
