@@ -2273,14 +2273,17 @@ GameValue TriMpClientReady(const GameState* /*state*/, GameValuePar arg)
         {
             UITestEngine ui;
             ControlsContainer* activeDisplay = ui.GetActiveDisplay();
+            bool foundReadyDisplay = false;
             for (ControlsContainer* current = activeDisplay; current; current = current->Child())
             {
                 if (auto* display = dynamic_cast<DisplayClientGetReady*>(current))
                 {
                     display->OnButtonClicked(IDC_OK);
-                    return GameValue("OK");
+                    foundReadyDisplay = true;
                 }
             }
+            if (foundReadyDisplay)
+                return GameValue("OK");
             if (GNetworkManager.GetGameState() < NGSPlay)
                 return GameValue("FAIL:no_client_get_ready");
             return GameValue("OK");
