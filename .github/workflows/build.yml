@@ -37,7 +37,7 @@ jobs:
       CWR_VCPKG_TRIPLET: x64-linux-clang
       CWR_BUILD_DIR: build/linux-x64-clang-rwdi
       # STRINGTABLE_MAP/EQUIPMENT/equipment.utf8.html cases need real
-      # localization assets from packages/Combined/, which is gitignored and
+      # localization assets from packages/Remastered/, which is gitignored and
       # not present on this hosted runner (see the [external-data] note on
       # build-cwr-arm64's matrix below, which excludes the same tests for
       # the same reason on its own hosted/non-real-data legs).
@@ -771,19 +771,18 @@ jobs:
         include:
           # [external-data] tests under PoseidonTests read real localization
           # assets (equipment.utf8.html, STRINGTABLE_MAP.utf8.csv,
-          # STRINGTABLE_EQUIPMENT.utf8.csv) from packages/Combined/, which is
+          # STRINGTABLE_EQUIPMENT.utf8.csv) from packages/Remastered/, which is
           # gitignored and not distributed to the GitHub-hosted runners by
-          # design. The self-hosted macOS runner has the real data staged
-          # outside the checkout path (see "Stage Combined test data" below)
-          # and runs these for real; the dedicated hosted jobs exclude them.
+          # design. The self-hosted runners have the real data staged
+          # outside the checkout path (see "Stage Remastered test data" below)
+          # and run these for real; the dedicated hosted jobs exclude them.
           - name: Linux (self-hosted) RelWithDebInfo
             os: [self-hosted, debian-13, x64]
             preset: linux-x64-clang-rwdi
             vcpkg_triplet: x64-linux-clang
             build_dir: build/linux-x64-clang-rwdi
             build_target: ''
-            ctest_exclude: 'PoseidonTests - (STRINGTABLE_MAP\.utf8\.csv ships both legend keys with English fallbacks|STRINGTABLE_EQUIPMENT\.utf8\.csv ships M16 keys for all 8 languages|equipment\.utf8\.html lives loose and references STR_EQ_M16 tokens|equipment\.utf8\.html line endings are clean CRLF \(no doubled CR\)|equipment\.utf8\.html preserves every EQ_ anchor and weapon image)'
-          # Supplementary check against the real (non-excluded) Combined data
+          # Supplementary check against the real (non-excluded) Remastered data
           # and a real GPU/Metal smoke test, on the single physical
           # self-hosted Mac -- optional (continue-on-error above) so it never
           # blocks on the shared-runner queue; treat a failure here as a real
@@ -831,13 +830,13 @@ jobs:
       # packages/ is gitignored and actions/checkout's clean:true wipes it
       # (git clean -ffdx removes ignored files too) at the start of every
       # run, so the real data lives outside the checkout at
-      # /Users/jarvis/ci-data/Combined and gets relinked in here each time.
-      # This path only exists on the self-hosted macOS runner.
-      - name: Stage Combined test data
-        if: runner.os == 'macOS' && runner.environment == 'self-hosted'
+      # ~/ci-data/Remastered and gets relinked in here each time. The data is
+      # staged at that location on both self-hosted runners.
+      - name: Stage Remastered test data
+        if: runner.environment == 'self-hosted'
         run: |
           mkdir -p packages
-          ln -sfn /Users/jarvis/ci-data/Combined packages/Combined
+          ln -sfn "${HOME}/ci-data/Remastered" packages/Remastered
 
       - name: Install Linux system packages
         if: runner.os == 'Linux'

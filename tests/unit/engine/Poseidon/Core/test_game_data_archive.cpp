@@ -81,7 +81,7 @@ TEST_CASE("GameDataArchive::Unpack extracts nested files with their content", "[
     std::filesystem::remove_all(root, ec);
 }
 
-// Real-world case: zipping a folder (Finder "Compress", `zip -r Combined/`)
+// Real-world case: zipping a folder (Finder "Compress", `zip -r Remastered/`)
 // wraps every entry in that folder's name -- must be stripped so DTA/AddOns/
 // BIN land at destDir's root, the same way a normal unarchiver would.
 TEST_CASE("GameDataArchive::Unpack strips a single common top-level wrapping folder", "[gamedata][archive]")
@@ -90,10 +90,10 @@ TEST_CASE("GameDataArchive::Unpack strips a single common top-level wrapping fol
     const auto zipPath = root / "fixture.zip";
     const auto destDir = root / "unpacked";
     MakeZip(zipPath, {
-                         {"Combined/", ""},
-                         {"Combined/BIN/CONFIG.BIN", "config-bytes"},
-                         {"Combined/DTA/Fonts.pbo", "font-bytes"},
-                         {"Combined/AddOns/O.pbo", "addon-bytes"},
+                         {"Remastered/", ""},
+                         {"Remastered/BIN/CONFIG.BIN", "config-bytes"},
+                         {"Remastered/DTA/Fonts.pbo", "font-bytes"},
+                         {"Remastered/AddOns/O.pbo", "addon-bytes"},
                      });
 
     std::string error;
@@ -103,7 +103,7 @@ TEST_CASE("GameDataArchive::Unpack strips a single common top-level wrapping fol
     CHECK(ReadFileText(destDir / "BIN" / "CONFIG.BIN") == "config-bytes");
     CHECK(ReadFileText(destDir / "DTA" / "Fonts.pbo") == "font-bytes");
     CHECK(ReadFileText(destDir / "AddOns" / "O.pbo") == "addon-bytes");
-    CHECK_FALSE(std::filesystem::exists(destDir / "Combined"));
+    CHECK_FALSE(std::filesystem::exists(destDir / "Remastered"));
 
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
@@ -136,10 +136,10 @@ TEST_CASE("GameDataArchive::Unpack skips __MACOSX and .DS_Store noise entries", 
     const auto zipPath = root / "fixture.zip";
     const auto destDir = root / "unpacked";
     MakeZip(zipPath, {
-                         {"Combined/", ""},
-                         {"Combined/.DS_Store", "junk"},
-                         {"Combined/BIN/CONFIG.BIN", "config-bytes"},
-                         {"__MACOSX/Combined/._BIN", "resource-fork-junk"},
+                         {"Remastered/", ""},
+                         {"Remastered/.DS_Store", "junk"},
+                         {"Remastered/BIN/CONFIG.BIN", "config-bytes"},
+                         {"__MACOSX/Remastered/._BIN", "resource-fork-junk"},
                      });
 
     std::string error;
