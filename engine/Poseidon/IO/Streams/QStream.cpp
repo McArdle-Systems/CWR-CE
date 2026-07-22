@@ -450,11 +450,7 @@ void QOFStream::close(const void* header, int headerSize)
     DWORD eCode = 0;
     char tmpFile[MaxFileName + 8];
     snprintf(tmpFile, sizeof(tmpFile), "%s.tmp", (const char*)_file);
-    HANDLE file = ::CreateFile(tmpFile, GENERIC_WRITE, 0,
-                               nullptr, // security
-                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
-                               nullptr // template
-    );
+    HANDLE file = OpenFileForWrite(tmpFile, true);
     if (file != INVALID_HANDLE_VALUE)
     {
         DWORD sizeWritten;
