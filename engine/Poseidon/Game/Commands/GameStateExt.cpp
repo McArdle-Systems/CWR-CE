@@ -850,138 +850,10 @@ GameValue WaypointShow(const GameState* state, GameValuePar oper1, GameValuePar 
 GameValue WaypointSynchronize(const GameState* state, GameValuePar oper1, GameValuePar oper2);
 GameValue WpSetPos(const GameState* state, GameValuePar oper1, GameValuePar oper2);
 
-// RESOURCE.BIN stores menu command values as symbolic expressions (for example
-// `CMD_REPLY_DONE`).  Some official binaries, including OFP Remastered's, do
-// not carry the optional serialized ParamFile enum table, so these identifiers
-// are engine constants rather than asset-owned variables.  Register them as
-// nulars: unlike GameState variables, nulars survive GGameState.Reset().
-template <int Value>
-static GameValue MenuCommandConstant(const GameState*)
-{
-    return GameValue(static_cast<GameScalarType>(Value));
-}
-
-#define MENU_COMMAND_CONSTANTS(X) \
-    X(CMD_SEPARATOR)              \
-    X(CMD_NOTHING)                \
-    X(CMD_HIDE_MENU)              \
-    X(CMD_BACK)                   \
-    X(CMD_WATCH)                  \
-    X(CMD_GETIN)                  \
-    X(CMD_GETOUT)                 \
-    X(CMD_ACTION)                 \
-    X(CMD_ADVANCE)                \
-    X(CMD_STAY_BACK)              \
-    X(CMD_FLANK_LEFT)             \
-    X(CMD_FLANK_RIGHT)            \
-    X(CMD_NEXT_WAYPOINT)          \
-    X(CMD_HIDE)                   \
-    X(CMD_JOIN)                   \
-    X(CMD_STOP)                   \
-    X(CMD_EXPECT)                 \
-    X(CMD_MOVE_SUBMENU)           \
-    X(CMD_FORM_COLUMN)            \
-    X(CMD_FORM_STAGCOL)           \
-    X(CMD_FORM_WEDGE)             \
-    X(CMD_FORM_ECHLEFT)           \
-    X(CMD_FORM_ECHRIGHT)          \
-    X(CMD_FORM_VEE)               \
-    X(CMD_FORM_LINE)              \
-    X(CMD_ENGAGE)                 \
-    X(CMD_LOOSE_FORM)             \
-    X(CMD_KEEP_FORM)              \
-    X(CMD_HOLD_FIRE)              \
-    X(CMD_OPEN_FIRE)              \
-    X(CMD_FIRE)                   \
-    X(CMD_WATCH_AROUND)           \
-    X(CMD_WATCH_AUTO)             \
-    X(CMD_WATCH_SUBMENU)          \
-    X(CMD_WATCH_FIRST)            \
-    X(CMD_WATCH_N)                \
-    X(CMD_WATCH_NE)               \
-    X(CMD_WATCH_E)                \
-    X(CMD_WATCH_SE)               \
-    X(CMD_WATCH_S)                \
-    X(CMD_WATCH_SW)               \
-    X(CMD_WATCH_W)                \
-    X(CMD_WATCH_NW)               \
-    X(CMD_STEALTH)                \
-    X(CMD_COMBAT)                 \
-    X(CMD_AWARE)                  \
-    X(CMD_SAFE)                   \
-    X(CMD_POS_UP)                 \
-    X(CMD_POS_DOWN)               \
-    X(CMD_POS_AUTO)               \
-    X(CMD_TEAM_MAIN)              \
-    X(CMD_TEAM_RED)               \
-    X(CMD_TEAM_GREEN)             \
-    X(CMD_TEAM_BLUE)              \
-    X(CMD_TEAM_YELLOW)            \
-    X(CMD_ASSIGN_MAIN)            \
-    X(CMD_ASSIGN_RED)             \
-    X(CMD_ASSIGN_GREEN)           \
-    X(CMD_ASSIGN_BLUE)            \
-    X(CMD_ASSIGN_YELLOW)          \
-    X(CMD_RADIO_ALPHA)            \
-    X(CMD_RADIO_BRAVO)            \
-    X(CMD_RADIO_CHARLIE)          \
-    X(CMD_RADIO_DELTA)            \
-    X(CMD_RADIO_ECHO)             \
-    X(CMD_RADIO_FOXTROT)          \
-    X(CMD_RADIO_GOLF)             \
-    X(CMD_RADIO_HOTEL)            \
-    X(CMD_RADIO_INDIA)            \
-    X(CMD_RADIO_JULIET)           \
-    X(CMD_REPLY_DONE)             \
-    X(CMD_REPLY_FAIL)             \
-    X(CMD_REPLY_COPY)             \
-    X(CMD_REPLY_REPEAT)           \
-    X(CMD_REPLY_WHERE_ARE_YOU)    \
-    X(CMD_REPORT)                 \
-    X(CMD_REPLY_ENGAGING)         \
-    X(CMD_REPLY_UNDER_FIRE)       \
-    X(CMD_REPLY_HIT)              \
-    X(CMD_REPLY_ONE_LESS)         \
-    X(CMD_REPLY_FIREREADY)        \
-    X(CMD_REPLY_FIRENOTREADY)     \
-    X(CMD_REPLY_KILLED)           \
-    X(CMD_REPLY_AMMO_LOW)         \
-    X(CMD_REPLY_FUEL_LOW)         \
-    X(CMD_REPLY_INJURED)          \
-    X(CMD_SUPPORT_MEDIC)          \
-    X(CMD_SUPPORT_REPAIR)         \
-    X(CMD_SUPPORT_REARM)          \
-    X(CMD_SUPPORT_REFUEL)         \
-    X(CMD_SUPPORT_DONE)           \
-    X(CMD_RADIO_CUSTOM)           \
-    X(CMD_RADIO_CUSTOM_1)         \
-    X(CMD_RADIO_CUSTOM_2)         \
-    X(CMD_RADIO_CUSTOM_3)         \
-    X(CMD_RADIO_CUSTOM_4)         \
-    X(CMD_RADIO_CUSTOM_5)         \
-    X(CMD_RADIO_CUSTOM_6)         \
-    X(CMD_RADIO_CUSTOM_7)         \
-    X(CMD_RADIO_CUSTOM_8)         \
-    X(CMD_RADIO_CUSTOM_9)         \
-    X(CMD_RADIO_CUSTOM_0)         \
-    X(CMD_MOVE_FIRST)             \
-    X(CMD_MOVE_N)                 \
-    X(CMD_MOVE_NE)                \
-    X(CMD_MOVE_E)                 \
-    X(CMD_MOVE_SE)                \
-    X(CMD_MOVE_S)                 \
-    X(CMD_MOVE_SW)                \
-    X(CMD_MOVE_W)                 \
-    X(CMD_MOVE_NW)                \
-    X(CMD_GETIN_TARGET)           \
-    X(CMD_WATCH_TARGET)           \
-    X(CMD_ACTION_TARGET)
-
 static const GameNular* GetExtNular(int& count)
 {
-#define REGISTER_MENU_COMMAND(name) GameNular(GameScalar, #name, MenuCommandConstant<name>),
     static const GameNular ExtNular[] = {
-        MENU_COMMAND_CONSTANTS(REGISTER_MENU_COMMAND) GameNular(GameObject, "player", Player),
+        GameNular(GameObject, "player", Player),
         GameNular(GameObject, "objNull", ObjNull),
         GameNular(GameGroup, "grpNull", GrpNull),
         GameNular(GameScalar, "time", GameTime),
@@ -1053,10 +925,7 @@ static const GameNular* GetExtNular(int& count)
     };
     count = sizeof(ExtNular) / sizeof(*ExtNular);
     return ExtNular;
-#undef REGISTER_MENU_COMMAND
 }
-
-#undef MENU_COMMAND_CONSTANTS
 
 static const GameFunction* GetExtUnary(int& count)
 {

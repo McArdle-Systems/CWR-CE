@@ -27,6 +27,7 @@
 #include <Poseidon/IO/Streams/QStream.hpp>
 #include <Poseidon/IO/Streams/FileAccessPolicy.hpp>
 #include <Poseidon/IO/Filesystem/FileOps.hpp>
+#include <Poseidon/IO/Filesystem/Utf8Paths.hpp>
 
 #ifdef POSIX_FILES
 #define NO_FILE(file) (file < 0)
@@ -448,13 +449,8 @@ void QOFStream::close(const void* header, int headerSize)
     }
 #else
     DWORD eCode = 0;
-    char tmpFile[MaxFileName + 8];
-    snprintf(tmpFile, sizeof(tmpFile), "%s.tmp", (const char*)_file);
-    HANDLE file = ::CreateFile(tmpFile, GENERIC_WRITE, 0,
-                               nullptr, // security
-                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
-                               nullptr // template
-    );
+    const std::string tmpFile = std::string((const char*)_file) + ".tmp";
+    HANDLE file = OpenFileForWrite(tmpFile.c_str(), true);
     if (file != INVALID_HANDLE_VALUE)
     {
         DWORD sizeWritten;
@@ -504,13 +500,21 @@ void QOFStream::close(const void* header, int headerSize)
         }
         if (_fail)
         {
-            ::DeleteFile(tmpFile); // best-effort: don't leave a partial temp behind
+            const std::wstring tmpFileWide = Utf8PathToWide(tmpFile.c_str());
+            if (!tmpFileWide.empty())
+                ::DeleteFileW(tmpFileWide.c_str()); // best-effort: don't leave a partial temp behind
         }
-        else if (!::MoveFileEx(tmpFile, _file, MOVEFILE_REPLACE_EXISTING))
+        else
         {
-            _fail = true;
-            if (eCode == 0)
-                eCode = ::GetLastError();
+            const std::wstring tmpFileWide = Utf8PathToWide(tmpFile.c_str());
+            const std::wstring fileWide = Utf8PathToWide((const char*)_file);
+            if (tmpFileWide.empty() || fileWide.empty() ||
+                !::MoveFileExW(tmpFileWide.c_str(), fileWide.c_str(), MOVEFILE_REPLACE_EXISTING))
+            {
+                _fail = true;
+                if (eCode == 0)
+                    eCode = ::GetLastError();
+            }
         }
     }
     else

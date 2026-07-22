@@ -308,11 +308,11 @@ void World::CreateChat()
         _chat = CreateChatUI();
     }
 }
-void World::CreateVoiceChat()
+void World::CreateVoiceChat(bool pushToTalk)
 {
     if (!_voiceChat)
     {
-        _voiceChat = CreateVoiceChatUI();
+        _voiceChat = CreateVoiceChatUI(pushToTalk);
     }
 }
 void World::CreateMainMap()
@@ -1508,6 +1508,7 @@ void World::RemoveIDs() const
 
 } // namespace Poseidon
 #include <Poseidon/Core/SaveVersion.hpp>
+#include <Poseidon/UI/Settings/AspectRatio.hpp>
 
 namespace Poseidon
 {
@@ -1598,6 +1599,8 @@ bool World::LoadBin(const char* name, int message)
     LOG_DEBUG(World, "Total allocated after ~ParamArchive: {} MB", Foundation::MemoryUsed() / (1024 * 1024));
     MemoryCleanUp();
     LOG_DEBUG(World, "Total allocated after MemoryCleanUp: {} MB", Foundation::MemoryUsed() / (1024 * 1024));
+    if (err == LSOK)
+        AspectRatio::SetGameplayActive(true);
     return err == LSOK;
 }
 
