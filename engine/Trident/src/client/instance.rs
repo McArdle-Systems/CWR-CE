@@ -553,7 +553,7 @@ mod tests {
         {
             // Reads /proc/<pid>/stat and treats a missing file (reaped) or 'Z'
             // (zombie) as no longer running; comm can contain ')' so split on the last.
-            return match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
                 Ok(stat) => {
                     let state = stat
                         .rsplit(')')
@@ -563,7 +563,7 @@ mod tests {
                     state != Some('Z')
                 }
                 Err(_) => false,
-            };
+            }
         }
 
         #[cfg(not(target_os = "linux"))]
