@@ -1,4 +1,0 @@
-tags = ["scripting", "headless", "issue-62"]
-binary = "PoseidonGame"
-timeout = 60
-extra_args = ["--no-strict"]
