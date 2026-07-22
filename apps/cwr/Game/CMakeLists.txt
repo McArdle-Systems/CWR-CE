@@ -207,12 +207,12 @@ if(POSEIDON_TARGET_IOS AND POSEIDON_IOS_BUNDLE_GAME_DATA)
     # configuration -- this licensed data can't ship in the bundle there, so
     # WinMain.cpp runs the on-device acquisition gate instead.
     file(GLOB_RECURSE POSEIDON_GAME_ASSET_FILES
-        RELATIVE "${CMAKE_SOURCE_DIR}/packages/Combined"
-        "${CMAKE_SOURCE_DIR}/packages/Combined/*"
+        RELATIVE "${CMAKE_SOURCE_DIR}/packages/Remastered"
+        "${CMAKE_SOURCE_DIR}/packages/Remastered/*"
     )
     set(POSEIDON_GAME_ASSET_ABS_PATHS "")
     foreach(_asset_rel ${POSEIDON_GAME_ASSET_FILES})
-        set(_asset_abs "${CMAKE_SOURCE_DIR}/packages/Combined/${_asset_rel}")
+        set(_asset_abs "${CMAKE_SOURCE_DIR}/packages/Remastered/${_asset_rel}")
         get_filename_component(_asset_reldir "${_asset_rel}" DIRECTORY)
         if(NOT _asset_reldir)
             set(_asset_reldir ".")

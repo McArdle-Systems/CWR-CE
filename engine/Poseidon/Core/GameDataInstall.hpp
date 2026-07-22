@@ -7,7 +7,7 @@
 namespace Poseidon
 {
 
-/// Install state of the licensed game-data package (packages/Combined on
+/// Install state of the licensed game-data package (packages/Remastered on
 /// desktop; user-supplied on iOS) relative to what's on disk.
 enum class GameDataStatus
 {

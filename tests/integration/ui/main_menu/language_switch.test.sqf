@@ -9,7 +9,7 @@
 // triAssertText / triAssertControlText inspect control text, so this checks
 // the language-refresh path even for glyphs the current font cannot render.
 //
-// Strings sourced from packages/Remaster/BIN/STRINGTABLE_MAINMENU.utf8.csv
+// Strings sourced from packages/Remastered/BIN/STRINGTABLE_MAINMENU.utf8.csv
 // (the modern menu-shard table that wins over the legacy STRINGTABLE.CSV
 // for keys defined in both).  When any caption changes there, this test
 // must be updated in lockstep.

@@ -118,17 +118,17 @@ vcpkg's binary cache (`~/.cache/vcpkg/archives` by default) is keyed by
 package content/ABI hash, not by path, so this won't trigger a from-source
 rebuild of dependencies — they're restored from cache.
 
-Game data: drop your Demo or retail game data into `packages/Remaster/`
+Game data: drop your Demo or retail game data into `packages/Remastered/`
 (git-ignored local staging dir — see [Getting game data](#getting-game-data-to-run-what-you-build)).
 Point the game at that directory with `-C`/`--work-dir` rather than `cd`-ing
 into it:
 
 ```sh
 # Native Metal backend on macOS
-build/macos-arm64-clang-rwdi/apps/cwr/Game/PoseidonGame -C packages/Remaster --render mtl --window
+build/macos-arm64-clang-rwdi/apps/cwr/Game/PoseidonGame -C packages/Remastered --render mtl --window
 
 # GL33 baseline (cross-platform default renderer, for comparison)
-build/macos-arm64-clang-rwdi/apps/cwr/Game/PoseidonGame -C packages/Remaster --render gl33 --window
+build/macos-arm64-clang-rwdi/apps/cwr/Game/PoseidonGame -C packages/Remastered --render gl33 --window
 ```
 
 `--window` runs windowed instead of fullscreen — useful for debugging, since
@@ -139,7 +139,7 @@ the splash screen.
 To debug under lldb, wrap the same invocation:
 
 ```sh
-lldb -o "run -C packages/Remaster --render mtl --window" -- build/macos-arm64-clang-rwdi/apps/cwr/Game/PoseidonGame
+lldb -o "run -C packages/Remastered --render mtl --window" -- build/macos-arm64-clang-rwdi/apps/cwr/Game/PoseidonGame
 ```
 
 ## How to Build and Run (iOS / arm64)
@@ -155,7 +155,7 @@ into its own sandboxed storage and boots from there. A Settings.app toggle
 ("Reset Game Data on Next Launch") clears the imported data and re-triggers
 this screen.
 
-For local development, you can instead bundle `packages/Combined/` straight
+For local development, you can instead bundle `packages/Remastered/` straight
 into the `.app` (skipping the on-device import screen entirely) by passing
 `-DPOSEIDON_IOS_BUNDLE_GAME_DATA=ON` at configure time:
 

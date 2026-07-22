@@ -1,7 +1,7 @@
 //! Interactive SQF REPL — evaluates expressions on a live game instance.
 //!
 //! Usage:
-//!   tri console --game-dir dist/linux-x64-clang-rwdi --data-dir packages/Remaster
+//!   tri console --game-dir dist/linux-x64-clang-rwdi --data-dir packages/Remastered
 //!
 //! Special commands (prefix with `/`):
 //!   /exec <code>   — fire-and-forget execution (no return value)
