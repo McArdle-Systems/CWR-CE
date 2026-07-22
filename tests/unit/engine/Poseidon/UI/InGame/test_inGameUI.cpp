@@ -8,6 +8,7 @@
 #include <Poseidon/UI/InGame/InGameUIImpl.hpp>
 #include <Poseidon/UI/InGame/InGameUIGroupUnitLabel.hpp>
 #include <Poseidon/Core/resincl.hpp>
+#include <Poseidon/IO/ParamFile/ParamFile.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <string>
@@ -44,4 +45,33 @@ TEST_CASE("InGameUI move-menu wiring tolerates a RscMainMenu without move comman
 
     SUCCEED("survived a RscMainMenu missing the movement command menu");
     delete menu;
+}
+
+// GitHub #62 "Radio menu navigation is incorrect": Menu::Load used to read a menu
+// item's "command" property unconditionally via GetInt(). A missing ParamEntry's
+// GetInt() sentinel returns 0, which is bit-identical to CMD_WATCH - so any config
+// item without an explicit command= (a plausible submenu-header entry) opened the
+// targeting/"Watch" list instead of descending into its own submenu.
+TEST_CASE("Menu::Load defaults a missing command to CMD_NOTHING, not CMD_WATCH", "[inGameUI][menu]")
+{
+    ParamFile pf;
+    ParamClass* topMenu = pf.AddClass("TestMenu");
+    topMenu->Add("title", "Test");
+    topMenu->Add("atomic", 0);
+
+    ParamEntry* items = topMenu->AddArray("items");
+    items->AddValue("Item1");
+
+    ParamClass* item1 = topMenu->AddClass("Item1");
+    item1->Add("title", "Item 1");
+    item1->Add("key", 0);
+    item1->Add("character", "");
+    // Deliberately no "command" entry - this is the config state that triggers the bug.
+
+    Menu menu;
+    menu.Load(topMenu);
+
+    REQUIRE(menu._items.Size() == 1);
+    REQUIRE(menu._items[0]->_cmd == CMD_NOTHING);
+    REQUIRE(menu._items[0]->_cmd != CMD_WATCH);
 }

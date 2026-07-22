@@ -502,7 +502,9 @@ void Menu::Load(const ParamEntry* cls)
         RString itemTitle = (*clsItem) >> "title";
         int itemKey = TranslateLegacyMenuKey(((*clsItem) >> "key").GetInt());
         RString itemChar = (*clsItem) >> "character";
-        int itemCmd = ((*clsItem) >> "command").GetInt();
+        // A missing "command" entry must not silently become CMD_WATCH (command 0) -
+        // that collides with a real, navigation-breaking command.
+        int itemCmd = clsItem->FindEntry("command") ? ((*clsItem) >> "command").GetInt() : CMD_NOTHING;
         if (clsItem->FindEntry("menu"))
         {
             Menu* submenu = new Menu();

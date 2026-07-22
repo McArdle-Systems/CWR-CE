@@ -6,12 +6,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRESET="${PRESET:-macos-arm64-clang-rwdi}"
 TARGET="${TARGET:-PoseidonGame}"
 JOBS="${JOBS:-8}"
-CONTENT_DIR="${CONTENT_DIR:-packages/Combined}"
+CONTENT_DIR="${CONTENT_DIR:-packages/Remastered}"
 RENDER="${RENDER:-mtl}"
 CONFIGURE="${CONFIGURE:-1}"
 DEFAULT_TEST_MISSION="${HOME}/Documents/Cold War Assault/missions/benchmark.abel"
 TEST_MISSION_SET=0
 TEST_MISSION=""
+DEFAULT_LOG_FILE="/tmp/cwr-run.log"
+LOG_FILE_SET=0
+LOG_FILE=""
 GAME_ARGS=()
 
 usage() {
@@ -32,11 +35,16 @@ Environment overrides:
 Options:
   --test-mission[=PATH]  Launch a test mission. Without PATH, uses:
                          $DEFAULT_TEST_MISSION
+  --log-file[=PATH]      Mirror log output to a file in addition to the
+                         terminal (engine's --log-file, both sinks are
+                         always active together). Without PATH, uses:
+                         $DEFAULT_LOG_FILE
 
 Examples:
   ./build-and-run.sh
   ./build-and-run.sh --test-mission
   ./build-and-run.sh --test-mission="\$HOME/.local/share/Cold War Assault/missions/benchmark.abel"
+  ./build-and-run.sh --test-mission --log-file
   RENDER=gl33 ./build-and-run.sh --no-sound
   CONFIGURE=0 JOBS=12 ./build-and-run.sh
 EOF
@@ -63,6 +71,21 @@ while (($# > 0)); do
                 shift
             fi
             ;;
+        --log-file=*)
+            LOG_FILE_SET=1
+            LOG_FILE="${1#*=}"
+            shift
+            ;;
+        --log-file)
+            LOG_FILE_SET=1
+            if [[ $# -ge 2 && "${2:0:1}" != "-" ]]; then
+                LOG_FILE="$2"
+                shift 2
+            else
+                LOG_FILE="$DEFAULT_LOG_FILE"
+                shift
+            fi
+            ;;
         --)
             shift
             GAME_ARGS+=("$@")
@@ -81,6 +104,11 @@ if [[ "$TEST_MISSION_SET" == "1" ]]; then
     else
         GAME_ARGS=(--test-mission "$TEST_MISSION")
     fi
+fi
+
+if [[ "$LOG_FILE_SET" == "1" ]]; then
+    GAME_ARGS=(--log-file "$LOG_FILE" ${GAME_ARGS[@]+"${GAME_ARGS[@]}"})
+    echo "Logging to terminal AND $LOG_FILE"
 fi
 
 BUILD_DIR="$ROOT_DIR/build/$PRESET"
