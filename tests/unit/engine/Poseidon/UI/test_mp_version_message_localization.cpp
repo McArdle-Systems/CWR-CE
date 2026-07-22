@@ -57,12 +57,5 @@ TEST_CASE("Legacy MP version row keeps columns aligned after an unquoted French 
 
 TEST_CASE("MP version rejection message follows Czech language selection", "[ui][mp][localization][GameData]")
 {
-    SECTION("Game")
-    {
-        CheckMpVersionMessage("Game");
-    }
-    SECTION("Demo")
-    {
-        CheckMpVersionMessage("Demo");
-    }
+    CheckMpVersionMessage("Combined");
 }
