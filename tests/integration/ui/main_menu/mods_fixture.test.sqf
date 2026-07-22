@@ -5,7 +5,7 @@
 // synthetic addon so mount/config loading is covered without third-party content.
 //
 // The .toml sidecar points --mods-dir at ../../tests/fixtures/mods (game CWD under
-// tri = the data dir packages/Remaster).
+// tri = the data dir packages/Remastered).
 
 triSetLanguage "English"
 triSimUntil { triGameMode == 2 }

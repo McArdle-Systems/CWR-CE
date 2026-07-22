@@ -193,7 +193,7 @@ bool GameDataArchive::Unpack(const char* archivePath, const char* destDir,
             }
             else
             {
-                // The wrapping folder's own directory entry (e.g. "Combined/")
+                // The wrapping folder's own directory entry (e.g. "Remastered/")
                 // -- nothing to create at destDir's root for ".".
                 continue;
             }

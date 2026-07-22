@@ -5,7 +5,7 @@ function(register_trident_integration_ctests)
         return()
     endif()
 
-    set(_tri_data_dir "${CMAKE_SOURCE_DIR}/packages/Combined")
+    set(_tri_data_dir "${CMAKE_SOURCE_DIR}/packages/Remastered")
     if(NOT EXISTS "${_tri_data_dir}")
         message(STATUS "Trident integration CTests disabled: ${_tri_data_dir} not found")
         return()
