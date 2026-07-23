@@ -38,8 +38,8 @@ In short: the code is free software, the name is not, and the game data comes se
 
 ### Step-by-step Guides
 
-There are installation/build guides for [Linux](docs/build/linux.md) and
-[Windows](docs/build/windows.md).
+There are installation/build guides for [Linux](docs/build/linux.md),
+[macOS](docs/build/macos.md), and [Windows](docs/build/win.md).
 
 ### Development Builds
 
