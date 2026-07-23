@@ -193,6 +193,8 @@ GameValue TriInGameplay(const GameState*);
 GameValue TriOpenMap(const GameState*);
 GameValue TriShowMap(const GameState*, GameValuePar);
 GameValue TriMapSetScale(const GameState*, GameValuePar);
+GameValue TriMapGetScale(const GameState*);
+GameValue TriBindAction(const GameState*, GameValuePar);
 GameValue TriShowVoiceOverlay(const GameState*, GameValuePar);
 GameValue TriClickBriefingLink(const GameState*, GameValuePar);
 GameValue TriProbeClickBriefingLink(const GameState*, GameValuePar);
@@ -3090,6 +3092,8 @@ INIT_MODULE(GameStateExtTest, 3)
     GGameState.NewNularOp(GameNular(GameString, "triPauseGame", TriPauseGame));
     GGameState.NewNularOp(GameNular(GameString, "triUnpauseGame", TriUnpauseGame));
     GGameState.NewNularOp(GameNular(GameString, "triOpenMap", TriOpenMap));
+    GGameState.NewNularOp(GameNular(GameScalar, "triMapGetScale", TriMapGetScale));
+    GGameState.NewFunction(GameFunction(GameString, "triBindAction", TriBindAction, GameArray));
     GGameState.NewFunction(GameFunction(GameString, "triShowMap", TriShowMap, GameScalar));
     GGameState.NewFunction(GameFunction(GameString, "triMapSetScale", TriMapSetScale, GameScalar));
     GGameState.NewFunction(GameFunction(GameString, "triShowVoiceOverlay", TriShowVoiceOverlay, GameScalar));
