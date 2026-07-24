@@ -49,8 +49,14 @@ The quickest way to get the game or server executables is to download the CI bui
 
 - [Clang](https://clang.llvm.org/)
 - [CMake](https://cmake.org/)
+- [ccache](https://ccache.dev/)
+- [Git](https://git-scm.com/)
 - [Ninja](https://ninja-build.org/)
 - [vcpkg](https://vcpkg.io/)
+
+`clang-format` is optional for compiling, but is required for the `Format`,
+`FormatFix`, `Lint`, and `LintFix` C++ formatting targets and the pre-push
+formatting hook.
 
 On Windows, run the following commands:
 
