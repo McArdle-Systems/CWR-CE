@@ -78,10 +78,21 @@ brew install ccache cmake git ninja
 Then follow the [macOS build guide](docs/build/macos.md#installing-the-dependencies)
 to set up vcpkg.
 
+#### Linux
+
+On Ubuntu or Debian:
+
+```sh
+sudo apt-get install ccache clang cmake git ninja-build pkg-config
+```
+
+See the [Linux build guide](docs/build/linux.md#installing-the-dependencies)
+for required system libraries and other distributions, then set up vcpkg.
+
 `clang-format` is optional for compiling, but is required for the `Format`,
 `FormatFix`, `Lint`, and `LintFix` C++ formatting targets and the pre-push
 formatting hook. Install it with `winget install PolarGoose.ClangFormat` on
-Windows or `brew install clang-format` on macOS.
+Windows, `brew install clang-format` on macOS, or your Linux package manager.
 
 ### Formatting hook
 
