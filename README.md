@@ -54,20 +54,34 @@ The quickest way to get the game or server executables is to download the CI bui
 - [Ninja](https://ninja-build.org/)
 - [vcpkg](https://vcpkg.io/)
 
-`clang-format` is optional for compiling, but is required for the `Format`,
-`FormatFix`, `Lint`, and `LintFix` C++ formatting targets and the pre-push
-formatting hook.
+#### Windows
 
-On Windows, run the following commands:
-
-```
-winget install Ccache.Ccache Kitware.CMake LLVM.LLVM Ninja-build.Ninja PolarGoose.ClangFormat
+```powershell
+winget install Ccache.Ccache Git.Git Kitware.CMake LLVM.LLVM Ninja-build.Ninja
 winget install Microsoft.VisualStudio.BuildTools --custom '"--add Microsoft.VisualStudio.Workload.VCTools;includeRecommended"'
 ```
 
 Then follow the instructions for [setting up
 vcpkg](https://learn.microsoft.com/en-us/vcpkg/get_started/get-started?pivots=shell-powershell)
 to get the required software.
+
+#### macOS
+
+Install the Xcode Command Line Tools, then the remaining build tools with
+Homebrew:
+
+```sh
+xcode-select --install
+brew install ccache cmake git ninja
+```
+
+Then follow the [macOS build guide](docs/build/macos.md#installing-the-dependencies)
+to set up vcpkg.
+
+`clang-format` is optional for compiling, but is required for the `Format`,
+`FormatFix`, `Lint`, and `LintFix` C++ formatting targets and the pre-push
+formatting hook. Install it with `winget install PolarGoose.ClangFormat` on
+Windows or `brew install clang-format` on macOS.
 
 ### Formatting hook
 
