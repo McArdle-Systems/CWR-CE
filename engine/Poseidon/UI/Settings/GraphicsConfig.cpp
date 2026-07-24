@@ -1,12 +1,11 @@
 #include <Poseidon/UI/Settings/GraphicsConfig.hpp>
 
 #include <Poseidon/IO/ParamFile/ParamFile.hpp>
+#include <Poseidon/UI/Settings/SettingsFile.hpp>
 
 #include <algorithm>
 #include <array>
-#include <filesystem>
 #include <cstdlib>
-#include <system_error>
 #include <Poseidon/Foundation/Strings/RString.hpp>
 
 namespace Poseidon
@@ -209,12 +208,9 @@ bool GraphicsConfig::Normalize(const Environment& /*env*/)
 
 bool GraphicsConfig::Load(const std::string& path)
 {
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec))
-        return false;
-
     ParamFile cfg;
-    cfg.Parse(RString(path.c_str()));
+    if (!ReadSettingsFile(path, cfg))
+        return false;
 
     version = 0;
     if (auto* e = cfg.FindEntry("version"))
@@ -250,11 +246,6 @@ bool GraphicsConfig::Load(const std::string& path)
 
 bool GraphicsConfig::Save(const std::string& path) const
 {
-    std::error_code ec;
-    std::filesystem::path p(path);
-    if (p.has_parent_path())
-        std::filesystem::create_directories(p.parent_path(), ec);
-
     ParamFile cfg;
     cfg.Add("qualityPreset", static_cast<int>(qualityPreset));
     cfg.Add("terrainDetail", static_cast<int>(terrainDetail));
@@ -270,8 +261,7 @@ bool GraphicsConfig::Save(const std::string& path) const
     cfg.Add("gamma", gamma);
     cfg.Add("version", version);
 
-    cfg.Save(RString(path.c_str()));
-    return std::filesystem::exists(path, ec);
+    return WriteSettingsFile(path, cfg);
 }
 
 } // namespace Poseidon
