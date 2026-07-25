@@ -72,14 +72,25 @@ function(dist_copy TARGET)
         if(_openal_lib AND ((WIN32 AND _openal_lib MATCHES "\\.dll$") OR (APPLE AND _openal_lib MATCHES "\\.dylib$")))
             if(WIN32)
                 set(_openal_dst "${DIST_DIR}")
+                add_custom_command(TARGET ${TARGET} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${_openal_lib}" "${_openal_dst}"
+                    VERBATIM
+                )
             else()
-                set(_openal_dst "${DIST_DIR}/libopenal.dylib")
+                # Preserve the real versioned basename required by the
+                # executable's @rpath load command, and also provide the
+                # stable alias used by OpenALRuntime's dlopen fallback.
+                get_filename_component(_openal_real "${_openal_lib}" REALPATH)
+                get_filename_component(_openal_name "${_openal_real}" NAME)
+                add_custom_command(TARGET ${TARGET} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${_openal_real}" "${DIST_DIR}/${_openal_name}"
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${_openal_real}" "${DIST_DIR}/libopenal.dylib"
+                    VERBATIM
+                )
             endif()
-            add_custom_command(TARGET ${TARGET} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${_openal_lib}" "${_openal_dst}"
-                VERBATIM
-            )
 
             get_filename_component(_openal_bin_dir "${_openal_lib}" DIRECTORY)
             get_filename_component(_openal_triplet_dir "${_openal_bin_dir}" DIRECTORY)
@@ -95,6 +106,8 @@ function(dist_copy TARGET)
             unset(_openal_triplet_dir)
             unset(_openal_copyright)
             unset(_openal_dst)
+            unset(_openal_real)
+            unset(_openal_name)
         endif()
         unset(_openal_lib)
     endif()
