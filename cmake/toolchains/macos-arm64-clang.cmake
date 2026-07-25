@@ -2,6 +2,7 @@ set(CMAKE_C_COMPILER clang)
 set(CMAKE_CXX_COMPILER clang++)
 
 # Native build - prevent CMake from treating this as cross-compilation
+set(CMAKE_SYSTEM_NAME Darwin)
 set(CMAKE_CROSSCOMPILING FALSE)
 
 # Apple Silicon only for now — Intel Macs are out of scope. This is just the

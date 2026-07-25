@@ -73,8 +73,7 @@ function(dist_copy TARGET)
             if(WIN32)
                 set(_openal_dst "${DIST_DIR}")
             else()
-                get_filename_component(_openal_name "${_openal_lib}" NAME)
-                set(_openal_dst "${DIST_DIR}/${_openal_name}")
+                set(_openal_dst "${DIST_DIR}/libopenal.dylib")
             endif()
             add_custom_command(TARGET ${TARGET} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -82,23 +81,20 @@ function(dist_copy TARGET)
                 VERBATIM
             )
 
-            if(WIN32)
-                get_filename_component(_openal_bin_dir "${_openal_lib}" DIRECTORY)
-                get_filename_component(_openal_triplet_dir "${_openal_bin_dir}" DIRECTORY)
-                set(_openal_copyright "${_openal_triplet_dir}/share/openal-soft/copyright")
-                if(EXISTS "${_openal_copyright}")
-                    add_custom_command(TARGET ${TARGET} POST_BUILD
-                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                            "${_openal_copyright}" "${DIST_DIR}/OpenAL-Soft.LICENSE.txt"
-                        VERBATIM
-                    )
-                endif()
-                unset(_openal_bin_dir)
-                unset(_openal_triplet_dir)
-                unset(_openal_copyright)
+            get_filename_component(_openal_bin_dir "${_openal_lib}" DIRECTORY)
+            get_filename_component(_openal_triplet_dir "${_openal_bin_dir}" DIRECTORY)
+            set(_openal_copyright "${_openal_triplet_dir}/share/openal-soft/copyright")
+            if(EXISTS "${_openal_copyright}")
+                add_custom_command(TARGET ${TARGET} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${_openal_copyright}" "${DIST_DIR}/OpenAL-Soft.LICENSE.txt"
+                    VERBATIM
+                )
             endif()
+            unset(_openal_bin_dir)
+            unset(_openal_triplet_dir)
+            unset(_openal_copyright)
             unset(_openal_dst)
-            unset(_openal_name)
         endif()
         unset(_openal_lib)
     endif()
