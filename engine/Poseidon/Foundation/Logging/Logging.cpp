@@ -569,8 +569,7 @@ void LoggingSystem::Initialize(const char* logLevel, const char* categoryFilter,
         {
             // Text mode: colored console with custom formatter
 #if defined(__APPLE__) && TARGET_OS_IPHONE
-            auto console_sink =
-                std::make_shared<spdlog::sinks::stdout_color_sink_mt>(spdlog::color_mode::never);
+            auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>(spdlog::color_mode::never);
 #else
             auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
 #endif
