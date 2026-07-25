@@ -20,12 +20,14 @@ add_library(PoseidonMTL STATIC
 target_link_libraries(PoseidonMTL PUBLIC Poseidon)
 
 target_include_directories(PoseidonMTL SYSTEM PUBLIC
-    ${CMAKE_SOURCE_DIR}/thirdparty/metal-cpp
     ${CMAKE_SOURCE_DIR}/thirdparty/imgui_backends
 )
 
 find_package(SDL3 CONFIG REQUIRED)
 target_link_libraries(PoseidonMTL PUBLIC SDL3::SDL3)
+
+find_path(METAL_CPP_INCLUDE_DIR Metal/Metal.hpp REQUIRED)
+target_include_directories(PoseidonMTL SYSTEM PUBLIC ${METAL_CPP_INCLUDE_DIR})
 
 find_library(METAL_FRAMEWORK Metal REQUIRED)
 find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
