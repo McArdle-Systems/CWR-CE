@@ -86,5 +86,7 @@ TEST_CASE("Metal cutouts preserve coverage without transparent depth writes", "[
         REQUIRE(bootstrap.find("obj.flags.w * saturate((obj.flags.z * 2.0 - 1.0) + grass.a) * 2.0") !=
                 std::string::npos);
         REQUIRE(bootstrap.find("setFragmentBytes(&obj, sizeof(obj), 1)") != std::string::npos);
+        REQUIRE(prepareRegion.find("GetWaterBumpMap()") != std::string::npos);
+        REQUIRE(prepareRegion.find("if (!isDetailTagged && _tlSecondaryTexture != 0)") != std::string::npos);
     }
 }
