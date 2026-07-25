@@ -4,6 +4,7 @@
 
 #include <Poseidon/Core/Application.hpp>
 #include <Poseidon/Core/Config/EngineConfig.hpp>
+#include <Poseidon/Core/Global.hpp>
 #include <Poseidon/Dev/Debug/DebugOverlay.hpp>
 #include <Poseidon/Graphics/Shared/WindowPlacement.hpp>
 #include <Poseidon/Graphics/Shared/ScreenshotWriter.hpp>
@@ -680,6 +681,14 @@ void EngineMTL::SetMaterial(const TLMaterial& mat, const LightList& lights, cons
     _tlObject.specEnabled[0] = mat.specularPower > 0 ? 1.0f : 0.0f;
 }
 
+void EngineMTL::SetGrassParams(float a1, float a2, float a3, float a4)
+{
+    _grassParams[0] = a1;
+    _grassParams[1] = a2;
+    _grassParams[2] = a3;
+    _grassParams[3] = a4;
+}
+
 // Per-section texture hook -- Shape::Draw (via ShapeSection::PrepareTL) calls
 // this right before each DrawSectionTL, same role PrepareTriangle plays for
 // the legacy path (GL33's equivalent is the SetTexture call PolyProperties::
@@ -696,6 +705,8 @@ void EngineMTL::PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& 
     const bool isCutout = tex && tex->IsTransparent();
     _tlObject.flags[0] = isCutout ? 1.0f : 0.0f;
     _tlObject.flags[1] = 0.0f;
+    _tlObject.flags[2] = _grassParams[0];
+    _tlObject.flags[3] = _grassParams[1];
     _tlSecondaryTexture = 0;
 
     // Same mapping BuildRenderPassDescriptor.hpp uses for d.sampler -- no
@@ -719,7 +730,20 @@ void EngineMTL::PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& 
     const render::RenderPassDescriptor d = render::BuildRenderPassDescriptor(spec, ctx);
     _tlSectionSurfaceMode = d.surface;
     _tlSectionShader = d.shader;
-    if (d.shader == render::ShaderFamily::Detail)
+    if (d.shader == render::ShaderFamily::Water)
+    {
+        _tlObject.flags[1] = 3.0f;
+        if (_textBank)
+        {
+            TextureMTL* water = _textBank->GetWaterBumpMap();
+            if (water)
+            {
+                _textBank->UseMipmap(water, 0, 0);
+                _tlSecondaryTexture = water->GpuHandle();
+            }
+        }
+    }
+    else if (d.shader == render::ShaderFamily::Detail)
     {
         // d.shader==Detail covers both DetailTexture- and SpecularTexture-
         // tagged sections (BuildRenderPassDescriptor.hpp's generic mtMask
@@ -745,6 +769,8 @@ void EngineMTL::PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& 
         // until a real water shader lands.
         if (isDetailTagged)
             _tlObject.flags[1] = 1.0f;
+        else
+            _tlObject.flags[1] = 3.0f;
         if (_textBank)
         {
             TextureMTL* tex = isDetailTagged ? _textBank->GetDetailTexture() : _textBank->GetSpecularTexture();
@@ -877,13 +903,11 @@ void EngineMTL::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelT
         _tlFrame.fogColor[1] = _fogColor.G();
         _tlFrame.fogColor[2] = _fogColor.B();
         _tlFrame.fogColor[3] = 1.0f;
-        // GL33 uploads zero to this shader slot for ordinary mesh draws; keep
-        // Metal's constant-buffer layout identical without feeding the absolute
-        // camera position into camera-relative lighting math.
-        _tlFrame.gl33CamPosZero[0] = 0.0f;
-        _tlFrame.gl33CamPosZero[1] = 0.0f;
-        _tlFrame.gl33CamPosZero[2] = 0.0f;
-        _tlFrame.gl33CamPosZero[3] = 0.0f;
+        const Vector3 waterSunDir = sun->SunDirection();
+        _tlFrame.waterSunDirAndTime[0] = static_cast<float>(waterSunDir.X());
+        _tlFrame.waterSunDirAndTime[1] = static_cast<float>(waterSunDir.Y());
+        _tlFrame.waterSunDirAndTime[2] = static_cast<float>(waterSunDir.Z());
+        _tlFrame.waterSunDirAndTime[3] = Glob.time.toFloat();
 
         _tlFrameValid = true;
     }

@@ -160,9 +160,7 @@ struct FrameConstants {
     float4 sunDirAndEnabled;
     float4 fogParams;
     float4 fogColor;
-    // GL33-compatible camPos slot. Ordinary mesh draws upload zero here;
-    // specular/fog use the camera-relative worldPos directly.
-    float4 camPosWorld;
+    float4 waterSunDirAndTime;
 };
 
 // One local point/spot light -- mirrors LightMTL (EngineMTLBootstrap.hpp)
@@ -180,7 +178,7 @@ struct ObjectConstants {
     float4 ambient;
     float4 diffuse;
     float4 emissive;
-    float4 flags; // x = 1.0 if texColor.a is meaningful (see ObjectConstantsMTL::flags)
+    float4 flags; // x=cutout, y=shader mode, z/w=grass alpha coefficients
     float4 lightCount; // x = active local-light count (0..8)
     LocalLight lights[8];
     float4 specular;    // rgb + power(w) -- sun-direction-only highlight
@@ -331,6 +329,14 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [
     out.position = clipPos;
     out.uv = v.uv;
     out.uv1 = obj.flags.y > 0.5 ? v.uv * 32.0 : v.uv;
+    if (obj.flags.y > 2.5)
+    {
+        float t = frame.waterSunDirAndTime.w;
+        float wave1 = sin(t * 0.04);
+        float wave2 = fmod(t * 0.3 + sin(t * 0.5) * 0.5, 2.0);
+        out.uv = v.uv + float2(wave1 * 0.5, wave1);
+        out.uv1 = v.uv * 64.0 + float2(wave2 * 0.5, wave2);
+    }
     out.color = float4(lit, obj.ambient.w);
     out.specColor = float4(clamp(specOut, 0.0, 1.0), 0.0);
     out.fogFactor = fogFactor;
@@ -342,13 +348,20 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [
 }
 
 static inline float4 applyDetailMode(float4 baseTex, float3 diffuseLit, float3 specLit, VSOutMesh in,
+                                     constant FrameConstants& frame, constant ObjectConstants& obj,
                                      texture2d<float> detailTex, sampler detailSamp)
 {
+    if (in.detailMode > 2.5)
+    {
+        float3 bumpNormal = -(detailTex.sample(detailSamp, in.uv1).xyz * 2.0 - 1.0);
+        float spec = saturate(dot(frame.waterSunDirAndTime.xyz, bumpNormal));
+        return float4(diffuseLit + spec, baseTex.a);
+    }
     if (in.detailMode > 1.5)
     {
         float4 grass = detailTex.sample(detailSamp, in.uv1);
         float3 rgb = clamp(diffuseLit * grass.rgb * 2.0, 0.0, 1.0);
-        float a = baseTex.a * grass.a;
+        float a = saturate(obj.flags.w * saturate((obj.flags.z * 2.0 - 1.0) + grass.a) * 2.0);
         return float4(rgb, a);
     }
     if (in.detailMode > 0.5)
@@ -378,6 +391,7 @@ constant float kSolidCutoutCoverage = 0.5;
 // Mostly opaque texels bypass the pattern so foliage bodies remain solid
 // instead of acquiring conspicuous screen-door holes.
 fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants& frame [[buffer(0)]],
+                             constant ObjectConstants& obj [[buffer(1)]],
                              texture2d<float> tex [[texture(0)]], texture2d<float> detailTex [[texture(1)]],
                              sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]])
 {
@@ -399,7 +413,7 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
         }
     }
     float3 diffuseLit = texColor.rgb * in.color.rgb;
-    float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, detailTex, detailSamp);
+    float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
     float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
     return float4(finalColor, in.color.a * detailed.a);
 }
@@ -409,6 +423,7 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
 // use fsMeshOpaque's coverage discard instead, so surviving pixels have
 // deterministic opaque color and depth.
 fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& frame [[buffer(0)]],
+                            constant ObjectConstants& obj [[buffer(1)]],
                             texture2d<float> tex [[texture(0)]], texture2d<float> detailTex [[texture(1)]],
                             sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]])
 {
@@ -426,7 +441,7 @@ fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& 
     if (texColor.a < (18.0 / 255.0))
         discard_fragment();
     float3 diffuseLit = texColor.rgb * in.color.rgb;
-    float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, detailTex, detailSamp);
+    float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
     float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
     return float4(finalColor, in.color.a * detailed.a);
 }
@@ -1303,6 +1318,13 @@ void EngineMTLBootstrap::EnsureTLPipeline()
     library->release();
 }
 
+bool EngineMTLBootstrap::ValidateMeshPipelines()
+{
+    EnsureTLPipeline();
+    return _impl->pipelineStateTL != nullptr && _impl->pipelineStateTLBlend != nullptr &&
+           _impl->pipelineStateTLAdditive != nullptr && _impl->pipelineStateTLShadow != nullptr;
+}
+
 void EngineMTLBootstrap::EnsureFallbackResources()
 {
     if (_impl->fallbackWhite != nullptr || _impl->device == nullptr)
@@ -1871,17 +1893,16 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     // Explicit rebind -- see DrawTriangles2D's matching comment: draw order
     // between the two paths within one encoder is not guaranteed.
     //
-    // Pipeline choice mirrors GL33's opaque-pass/BlendOnly-pass split:
+    // One shader handles the Normal, Detail, Grass, and Water families via
+    // ObjectConstants.flags.y; the family-specific equations match GL33's
+    // PSNormal/PSDetail/PSGrass/PSWater behavior.
     // BlendMode::AlphaBlend is true Blend-classified sections (AlphaStats::
     // Blend's doc comment: "must be deferred to the back-to-front pass"); its
     // fragment shader discards clear texels before the descriptor-selected
     // depth state is applied. BlendMode::Shadow is the single-pass shadow
     // scheme (see fsShadow's doc comment); anything else (Opaque, or a
-    // descriptor mode this path doesn't have a pipeline for yet) falls back
+    // descriptor mode) falls back
     // to the no-blend Opaque/Cutout pipeline.
-    /// TODO: ShaderFamily::Water/Detail/Grass don't have a real pipeline yet -- see
-    /// BuildRenderPassDescriptor.hpp. Anything that resolves to one of those
-    /// today silently falls back to Opaque here instead of failing loudly.
     MTL::RenderPipelineState* pipeline = _impl->pipelineStateTL;
     if (blendMode == Poseidon::render::BlendMode::Shadow)
         pipeline = _impl->pipelineStateTLShadow;
@@ -1929,6 +1950,7 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     _impl->currentEncoder->setVertexBytes(&obj, sizeof(obj), 1);
     _impl->currentEncoder->setVertexBytes(&frame, sizeof(frame), 2);
     _impl->currentEncoder->setFragmentBytes(&frame, sizeof(frame), 0);
+    _impl->currentEncoder->setFragmentBytes(&obj, sizeof(obj), 1);
     _impl->currentEncoder->setFragmentTexture(tex, 0);
     _impl->currentEncoder->setFragmentTexture(secondaryTex, 1);
 

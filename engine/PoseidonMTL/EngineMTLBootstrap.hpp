@@ -65,17 +65,13 @@ struct FrameConstantsMTL
     float sunDirAndEnabled[4]; // xyz = direction, w = 1.0/0.0 enabled
     float fogParams[4];        // start, invRange, enabled, 0
     float fogColor[4];         // rgb, a=1
-    // GL33-compatible camPos uniform slot. Ordinary mesh draws upload zero
-    // here even though FrameState tracks the true camera position; specular
-    // and fog operate on camera-relative worldPos. Must stay the last field
-    // and stay in sync with the MSL-side FrameConstants struct's camPosWorld
-    // (EngineMTLBootstrap.cpp) so Metal validation sees the full 192-byte
-    // constant payload.
-    float gl33CamPosZero[4];
+    // GL33 water constants: xyz = LightSun::SunDirection(), w = animation time.
+    // This occupies the formerly-unused GL33 camPos-compatible tail slot.
+    float waterSunDirAndTime[4];
 };
 
-static_assert(offsetof(FrameConstantsMTL, gl33CamPosZero) == 176,
-              "FrameConstantsMTL camPos slot offset must match MSL");
+static_assert(offsetof(FrameConstantsMTL, waterSunDirAndTime) == 176,
+              "FrameConstantsMTL water slot offset must match MSL");
 static_assert(sizeof(FrameConstantsMTL) == 192, "FrameConstantsMTL size must match MSL FrameConstants");
 
 // One local point/spot light, matching GL33's per-light VSConstants layout
@@ -108,9 +104,8 @@ struct ObjectConstantsMTL
     // 0.0 for ordinary opaque textures (no discard at all) and for
     // true Blend textures (those draw with fsMeshBlend instead, see
     // DrawSectionTL's blendEnabled parameter).
-    // y = mesh detail mode: 0 normal, 1 detail, 2 grass. This drives the
-    // secondary texture sample in the fragment shader while Water remains a
-    // later shader-family port.
+    // y = shader mode: 0 normal, 1 detail, 2 grass, 3 water.
+    // z/w = the two grass alpha coefficients supplied by SetGrassParams.
     float flags[4];
     // Local point/spot lights (street lamps, vehicle headlights) -- ported
     // from GL33's UploadVSLights. Only ever non-empty when the sun's
@@ -195,6 +190,9 @@ class EngineMTLBootstrap
     // collide with metal-cpp, only the broader Poseidon headers do, so this
     // class logs through the real engine logger now, not raw stderr).
     bool IsPipelineReady() const;
+    // Eagerly compile all hardware-TL MSL functions and pipeline variants.
+    // The smoke test uses this to catch embedded shader failures.
+    bool ValidateMeshPipelines();
 
     // --- Real 2D rendering (Piece 2) ---
 

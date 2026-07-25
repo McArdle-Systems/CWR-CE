@@ -137,6 +137,7 @@ class EngineMTL : public Engine
     bool GetTLOnSurface() const override { return true; }
     VertexBuffer* CreateVertexBuffer(const Shape& src, VBType type) override;
     void EnableSunLight(bool enable) override { _sunEnabled = enable; }
+    void SetGrassParams(float a1, float a2, float a3 = 0, float a4 = 0) override;
     void SetMaterial(const TLMaterial& mat, const LightList& lights, const render::LegacySpec& spec) override;
     void PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& spec) override;
     void PrepareMeshTL(const LightList& lights, const Matrix4& modelToWorld, const render::LegacySpec& spec) override;
@@ -272,6 +273,7 @@ class EngineMTL : public Engine
     // larger surface) is wrap addressing, not clamp.
     render::SamplerMode _tlSectionSampler = {render::SamplerFilter::Linear, false, false};
     bool _sunEnabled = false;
+    float _grassParams[4] = {};
 
     void CreateWindowAndDevice();
 

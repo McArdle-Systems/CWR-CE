@@ -75,4 +75,16 @@ TEST_CASE("Metal cutouts preserve coverage without transparent depth writes", "[
     REQUIRE_FALSE(textureMetal.empty());
     REQUIRE(textureMetal.find("decoded.pctPartial < 30.0") != std::string::npos);
     REQUIRE(bootstrap.find("state.alphaRef == 254 ? _impl->depthStateTLLess") != std::string::npos);
+
+    SECTION("Water, detail, and grass use their GL33-equivalent equations")
+    {
+        REQUIRE(bootstrap.find("float3 bumpNormal = -(detailTex.sample") != std::string::npos);
+        REQUIRE(bootstrap.find("dot(frame.waterSunDirAndTime.xyz, bumpNormal)") != std::string::npos);
+        REQUIRE(bootstrap.find("float wave1 = sin(t * 0.04)") != std::string::npos);
+        REQUIRE(bootstrap.find("v.uv * 64.0 + float2(wave2 * 0.5, wave2)") != std::string::npos);
+        REQUIRE(bootstrap.find("diffuseLit * (detail.a * 2.0) + specLit") != std::string::npos);
+        REQUIRE(bootstrap.find("obj.flags.w * saturate((obj.flags.z * 2.0 - 1.0) + grass.a) * 2.0") !=
+                std::string::npos);
+        REQUIRE(bootstrap.find("setFragmentBytes(&obj, sizeof(obj), 1)") != std::string::npos);
+    }
 }
