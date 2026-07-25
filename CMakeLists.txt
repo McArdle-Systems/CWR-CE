@@ -455,9 +455,9 @@ foreach(source ${ALL_CPP_SOURCES})
 endforeach()
 
 # clang-format targets
-find_program(CLANG_FORMAT_EXE NAMES clang-format REQUIRED)
+find_program(CLANG_FORMAT_EXE NAMES clang-format)
 
-if(WIN32)
+if(CLANG_FORMAT_EXE AND WIN32)
     add_custom_target(Format
         COMMAND powershell -NoProfile -Command "Get-Content ${CMAKE_BINARY_DIR}/format_sources.txt | ForEach-Object { & '${CLANG_FORMAT_EXE}' --dry-run --Werror $_ }"
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -470,7 +470,7 @@ if(WIN32)
         COMMENT "Formatting C++ sources with clang-format"
         VERBATIM
     )
-else()
+elseif(CLANG_FORMAT_EXE)
     add_custom_target(Format
         COMMAND xargs -a ${CMAKE_BINARY_DIR}/format_sources.txt ${CLANG_FORMAT_EXE} --dry-run --Werror
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -483,6 +483,8 @@ else()
         COMMENT "Formatting C++ sources with clang-format"
         VERBATIM
     )
+else()
+    message(STATUS "clang-format not found; Format and FormatFix targets are disabled")
 endif()
 
 # Python lint targets (ruff via uv, optional)
@@ -509,13 +511,20 @@ if(UV_EXE AND EXISTS ${BLENDER_ADDON_DIR}/pyproject.toml)
         VERBATIM
     )
 
-    # Combined targets: C++ + Python
+endif()
+
+# Combined targets include whichever optional lint tools are available.
+if(CLANG_FORMAT_EXE AND UV_EXE AND EXISTS ${BLENDER_ADDON_DIR}/pyproject.toml)
     add_custom_target(Lint DEPENDS Format PythonLint)
     add_custom_target(LintFix DEPENDS FormatFix PythonLintFix)
-else()
-    # No Python tooling — Lint just runs C++ format
+elseif(CLANG_FORMAT_EXE)
     add_custom_target(Lint DEPENDS Format)
     add_custom_target(LintFix DEPENDS FormatFix)
+elseif(UV_EXE AND EXISTS ${BLENDER_ADDON_DIR}/pyproject.toml)
+    add_custom_target(Lint DEPENDS PythonLint)
+    add_custom_target(LintFix DEPENDS PythonLintFix)
+else()
+    message(STATUS "No lint tools found; Lint and LintFix targets are disabled")
 endif()
 
 # clang-tidy targets

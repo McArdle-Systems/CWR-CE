@@ -49,19 +49,47 @@ The quickest way to get the game or server executables is to download the CI bui
 
 - [Clang](https://clang.llvm.org/)
 - [CMake](https://cmake.org/)
+- [ccache](https://ccache.dev/)
+- [Git](https://git-scm.com/)
 - [Ninja](https://ninja-build.org/)
 - [vcpkg](https://vcpkg.io/)
 
-On Windows, run the following commands:
+The commands below also install the optional `clang-format` developer tool.
 
-```
-winget install Ccache.Ccache Kitware.CMake LLVM.LLVM Ninja-build.Ninja PolarGoose.ClangFormat
+#### Windows
+
+```powershell
+winget install Ccache.Ccache Git.Git Kitware.CMake LLVM.LLVM Ninja-build.Ninja PolarGoose.ClangFormat
 winget install Microsoft.VisualStudio.BuildTools --custom '"--add Microsoft.VisualStudio.Workload.VCTools;includeRecommended"'
 ```
 
 Then follow the instructions for [setting up
 vcpkg](https://learn.microsoft.com/en-us/vcpkg/get_started/get-started?pivots=shell-powershell)
 to get the required software.
+
+#### macOS
+
+Install the Xcode Command Line Tools, then the remaining build tools with
+Homebrew:
+
+```sh
+xcode-select --install
+brew install ccache clang-format cmake git ninja
+```
+
+Then follow the [macOS build guide](docs/build/macos.md#installing-the-dependencies)
+to set up vcpkg.
+
+#### Linux
+
+On Ubuntu or Debian:
+
+```sh
+sudo apt-get install ccache clang clang-format cmake git ninja-build pkg-config
+```
+
+See the [Linux build guide](docs/build/linux.md#installing-the-dependencies)
+for required system libraries and other distributions, then set up vcpkg.
 
 ### Formatting hook
 
