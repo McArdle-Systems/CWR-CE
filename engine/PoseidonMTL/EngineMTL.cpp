@@ -775,7 +775,6 @@ void EngineMTL::PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& 
     _tlSectionShader = d.shader;
     if (d.shader == render::ShaderFamily::Water)
     {
-        _tlObject.flags[1] = 3.0f;
         if (_textBank)
         {
             TextureMTL* water = _textBank->GetWaterBumpMap();
@@ -783,6 +782,12 @@ void EngineMTL::PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& 
             {
                 _textBank->UseMipmap(water, 0, 0);
                 _tlSecondaryTexture = water->GpuHandle();
+                // Do not enable the bump/specular equation unless the bump
+                // map really made it to the GPU. The slot's fallback texture
+                // is opaque white, which decodes as a constant (-1,-1,-1)
+                // normal and can saturate the entire water surface to white.
+                if (_tlSecondaryTexture != 0)
+                    _tlObject.flags[1] = 3.0f;
             }
         }
     }
@@ -791,36 +796,22 @@ void EngineMTL::PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& 
         // d.shader==Detail covers both DetailTexture- and SpecularTexture-
         // tagged sections (BuildRenderPassDescriptor.hpp's generic mtMask
         // branch collapses both to Detail when GrassTexture isn't set).
-        // GL33's SetTexture (EngineGL33_State.cpp) re-checks the original
-        // bits to pick which texture actually goes on unit 1 -- water tiles
-        // carry SpecularTexture (LandscapeRender.cpp's WaterFlags), not
-        // DetailTexture, and need the specular/bump texture there, not the
-        // ground detail texture.
+        // Water tiles currently carry SpecularTexture rather than IsWater
+        // (LandscapeRender.cpp's WaterFlags), so they arrive through this
+        // generic Detail family. For Metal, route that legacy marker to the
+        // dedicated water bump map and water equation.
         const bool isDetailTagged = render::Has(spec.backend, render::Backend::DetailTexture);
-        // Only flag true ground-Detail sections for fsMeshOpaque/Blend's
-        // detail-multiply (baseLit * detailTex.a * 2) -- confirmed via a
-        // magenta-marker test that water/SpecularTexture sections go through
-        // this exact branch today (no dedicated water shader yet, see
-        // EngineMTLBootstrap.cpp's Water/Detail/Grass pipeline TODO). That
-        // formula treats the secondary texture's alpha as a ground-texture
-        // brightness multiplier; for a bump/normal map (water's case) alpha
-        // is unrelated and can crush the lit water color toward black. GL33's
-        // dedicated PSWater shader instead adds a bump-driven specular
-        // highlight, never multiplying toward black. Leaving flags[1] at its
-        // default 0 here falls through to applyDetailMode's plain-baseLit
-        // branch -- correct brightness, just without the specular sparkle,
-        // until a real water shader lands.
         if (isDetailTagged)
             _tlObject.flags[1] = 1.0f;
-        else
-            _tlObject.flags[1] = 3.0f;
         if (_textBank)
         {
-            TextureMTL* tex = isDetailTagged ? _textBank->GetDetailTexture() : _textBank->GetSpecularTexture();
+            TextureMTL* tex = isDetailTagged ? _textBank->GetDetailTexture() : _textBank->GetWaterBumpMap();
             if (tex)
             {
                 _textBank->UseMipmap(tex, 0, 0);
                 _tlSecondaryTexture = tex->GpuHandle();
+                if (!isDetailTagged && _tlSecondaryTexture != 0)
+                    _tlObject.flags[1] = 3.0f;
             }
         }
     }
