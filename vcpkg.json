@@ -20,7 +20,13 @@
     "sse2neon",
     {
       "name": "imgui",
-      "features": ["sdl3-binding", "sdl3-renderer-binding", "opengl3-binding", "freetype", "test-engine"]
+      "features": ["sdl3-binding", "sdl3-renderer-binding", "opengl3-binding", "freetype"],
+      "platform": "ios"
+    },
+    {
+      "name": "imgui",
+      "features": ["sdl3-binding", "sdl3-renderer-binding", "opengl3-binding", "freetype", "test-engine"],
+      "platform": "!ios"
     },
     {
       "name": "spdlog",
