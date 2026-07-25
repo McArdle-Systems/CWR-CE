@@ -34,7 +34,7 @@
       "inherits": "macos-clang-debug",
       "binaryDir": "${sourceDir}/build/macos-arm64-clang",
       "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "VCPKG_TARGET_TRIPLET": "arm64-macos-clang",
         "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/macos-arm64-clang.cmake"
       }
     },
@@ -44,7 +44,7 @@
       "inherits": "macos-clang-relwithdebinfo",
       "binaryDir": "${sourceDir}/build/macos-arm64-clang-rwdi",
       "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "VCPKG_TARGET_TRIPLET": "arm64-macos-clang",
         "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/macos-arm64-clang.cmake"
       }
     },
@@ -54,8 +54,38 @@
       "inherits": "macos-clang-release",
       "binaryDir": "${sourceDir}/build/macos-arm64-clang-rel",
       "cacheVariables": {
-        "VCPKG_TARGET_TRIPLET": "arm64-osx",
+        "VCPKG_TARGET_TRIPLET": "arm64-macos-clang",
         "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/macos-arm64-clang.cmake"
+      }
+    },
+    {
+      "name": "macos-x64-clang",
+      "displayName": "macOS x64 Clang Debug",
+      "inherits": "macos-clang-debug",
+      "binaryDir": "${sourceDir}/build/macos-x64-clang",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-macos-clang",
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/macos-x64-clang.cmake"
+      }
+    },
+    {
+      "name": "macos-x64-clang-rwdi",
+      "displayName": "macOS x64 Clang RelWithDebInfo",
+      "inherits": "macos-clang-relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/macos-x64-clang-rwdi",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-macos-clang",
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/macos-x64-clang.cmake"
+      }
+    },
+    {
+      "name": "macos-x64-clang-rel",
+      "displayName": "macOS x64 Clang Release",
+      "inherits": "macos-clang-release",
+      "binaryDir": "${sourceDir}/build/macos-x64-clang-rel",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-macos-clang",
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/macos-x64-clang.cmake"
       }
     }
   ]

@@ -299,15 +299,19 @@ jobs:
           if-no-files-found: ignore
 
   build-macos:
-    name: macOS RelWithDebInfo
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    name: macOS ${{ matrix.arch }} RelWithDebInfo
     runs-on: macos-latest
     env:
-      CWR_PRESET: macos-arm64-clang-rwdi
-      CWR_VCPKG_TRIPLET: arm64-osx
-      CWR_BUILD_DIR: build/macos-arm64-clang-rwdi
+      CWR_PRESET: macos-${{ matrix.arch }}-clang-rwdi
+      CWR_VCPKG_TRIPLET: ${{ matrix.arch }}-macos-clang
+      CWR_BUILD_DIR: build/macos-${{ matrix.arch }}-clang-rwdi
       CWR_CTEST_EXCLUDE: 'PoseidonTests - (STRINGTABLE_MAP\.utf8\.csv ships both legend keys with English fallbacks|STRINGTABLE_EQUIPMENT\.utf8\.csv ships M16 keys for all 8 languages|equipment\.utf8\.html lives loose and references STR_EQ_M16 tokens|equipment\.utf8\.html line endings are clean CRLF \(no doubled CR\)|equipment\.utf8\.html preserves every EQ_ anchor and weapon image)|PoseidonFoundationTests - potime - (Poseidon - Foundation - getSystemTime timing accuracy|Common usage patterns|Platform consistency|SLEEP_MS macro)'
-      CWR_DIST_DIR: dist/macos-arm64-clang-rwdi
-      CWR_ARTIFACT_PREFIX: macOS-arm64-rwdi
+      CWR_DIST_DIR: dist/macos-${{ matrix.arch }}-clang-rwdi
+      CWR_ARTIFACT_PREFIX: macOS-${{ matrix.arch }}-rwdi
 
     steps:
       - name: Checkout
@@ -790,7 +794,7 @@ jobs:
           - name: macOS (Apple Silicon, self-hosted, real data) RelWithDebInfo
             os: [self-hosted, macOS, arm64]
             preset: macos-arm64-clang-rwdi
-            vcpkg_triplet: arm64-osx
+            vcpkg_triplet: arm64-macos-clang
             build_dir: build/macos-arm64-clang-rwdi
             build_target: ''
             optional: true
@@ -961,7 +965,7 @@ jobs:
           VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/cmake/vcpkg-triplets
         with:
           vcpkgDirectory: ${{ runner.tool_cache }}/vcpkg
-          vcpkgGitCommitId: fa9a5b330aed997a68310ed56418617b87a3b83d
+          vcpkgGitCommitId: 170bd3bfb152a1795b67b5c2190ab7d899fc9971
           runVcpkgInstall: true
           vcpkgJsonGlob: 'vcpkg.json'
 
