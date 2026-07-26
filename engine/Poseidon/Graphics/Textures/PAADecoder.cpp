@@ -488,7 +488,36 @@ bool DecodeLevelPixels(QIStream& in, PacFormat format, PacLevelMem& mip, PacPale
                 return false;
         }
     }
-    else if (format == PacARGB4444 || format == PacAI88)
+    else if (format == PacAI88)
+    {
+        // AI88 is genuinely 8-bit alpha + 8-bit intensity. Routing it through
+        // the ARGB4444 destination format below (like real 4-bit ARGB4444
+        // textures) truncates both channels down to their top 4 bits before
+        // re-expanding via bit-replication -- harmless for actual ARGB4444
+        // source data (no precision to lose there), but it collapses AI88's
+        // 256-level gradients to 16 visibly banded steps. GL33 never hits
+        // this: it uploads AI88 straight to a native 8-bit GL_RG8 texture
+        // (TextureGL33_Init.cpp), so this CPU decode is Metal-only.
+        // PacLevelMem::LoadPaaBin16 already has a dedicated, full-precision
+        // AI88->ARGB8888 conversion (its PacARGB8888 destination-format
+        // branch) -- use that instead of the lossy 4444 shortcut.
+        mip.SetDestFormat(PacARGB8888, 4);
+        std::vector<uint8_t> mipData(mip.Size(), 0);
+        mip.SeekLevel(in);
+        int ret = isPaa ? mip.LoadPaa(in, mipData.data(), &pal) : mip.LoadPac(in, mipData.data(), &pal);
+        if (ret != 0)
+        {
+            outRgba.clear();
+            return false;
+        }
+        // Already R,G,B,A per texel (LoadPaaBin16's ARGB8888 branch writes
+        // R=G=B=intensity, A=alpha directly) -- just account for row pitch
+        // possibly exceeding width*4 (alignment padding), no per-pixel unpack.
+        for (int y = 0; y < height; y++)
+            std::memcpy(outRgba.data() + static_cast<size_t>(y) * width * 4,
+                       mipData.data() + static_cast<size_t>(y) * mip.Pitch(), static_cast<size_t>(width) * 4);
+    }
+    else if (format == PacARGB4444)
     {
         mip.SetDestFormat(PacARGB4444, 4);
         std::vector<uint8_t> mipData(mip.Size(), 0);
