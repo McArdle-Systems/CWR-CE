@@ -515,7 +515,7 @@ bool DecodeLevelPixels(QIStream& in, PacFormat format, PacLevelMem& mip, PacPale
         // possibly exceeding width*4 (alignment padding), no per-pixel unpack.
         for (int y = 0; y < height; y++)
             std::memcpy(outRgba.data() + static_cast<size_t>(y) * width * 4,
-                       mipData.data() + static_cast<size_t>(y) * mip.Pitch(), static_cast<size_t>(width) * 4);
+                        mipData.data() + static_cast<size_t>(y) * mip.Pitch(), static_cast<size_t>(width) * 4);
     }
     else if (format == PacARGB4444)
     {
