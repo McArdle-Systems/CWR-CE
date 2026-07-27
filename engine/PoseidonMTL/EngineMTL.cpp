@@ -4,6 +4,7 @@
 
 #include <Poseidon/Core/Application.hpp>
 #include <Poseidon/Core/Config/EngineConfig.hpp>
+#include <Poseidon/Core/Global.hpp>
 #include <Poseidon/Dev/Debug/DebugOverlay.hpp>
 #include <Poseidon/Graphics/Shared/WindowPlacement.hpp>
 #include <Poseidon/Graphics/Shared/ScreenshotWriter.hpp>
@@ -723,6 +724,14 @@ void EngineMTL::SetMaterial(const TLMaterial& mat, const LightList& lights, cons
     _tlObject.specEnabled[0] = mat.specularPower > 0 ? 1.0f : 0.0f;
 }
 
+void EngineMTL::SetGrassParams(float a1, float a2, float a3, float a4)
+{
+    _grassParams[0] = a1;
+    _grassParams[1] = a2;
+    _grassParams[2] = a3;
+    _grassParams[3] = a4;
+}
+
 // Per-section texture hook -- Shape::Draw (via ShapeSection::PrepareTL) calls
 // this right before each DrawSectionTL, same role PrepareTriangle plays for
 // the legacy path (GL33's equivalent is the SetTexture call PolyProperties::
@@ -739,6 +748,8 @@ void EngineMTL::PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& 
     const bool isCutout = tex && tex->IsTransparent();
     _tlObject.flags[0] = isCutout ? 1.0f : 0.0f;
     _tlObject.flags[1] = 0.0f;
+    _tlObject.flags[2] = _grassParams[0];
+    _tlObject.flags[3] = _grassParams[1];
     _tlSecondaryTexture = 0;
 
     // Same mapping BuildRenderPassDescriptor.hpp uses for d.sampler -- no
@@ -762,39 +773,45 @@ void EngineMTL::PrepareTriangleTL(const MipInfo& mip, const render::LegacySpec& 
     const render::RenderPassDescriptor d = render::BuildRenderPassDescriptor(spec, ctx);
     _tlSectionSurfaceMode = d.surface;
     _tlSectionShader = d.shader;
-    if (d.shader == render::ShaderFamily::Detail)
+    if (d.shader == render::ShaderFamily::Water)
+    {
+        if (_textBank)
+        {
+            TextureMTL* water = _textBank->GetWaterBumpMap();
+            if (water)
+            {
+                _textBank->UseMipmap(water, 0, 0);
+                _tlSecondaryTexture = water->GpuHandle();
+                // Do not enable the bump/specular equation unless the bump
+                // map really made it to the GPU. The slot's fallback texture
+                // is opaque white, which decodes as a constant (-1,-1,-1)
+                // normal and can saturate the entire water surface to white.
+                if (_tlSecondaryTexture != 0)
+                    _tlObject.flags[1] = 3.0f;
+            }
+        }
+    }
+    else if (d.shader == render::ShaderFamily::Detail)
     {
         // d.shader==Detail covers both DetailTexture- and SpecularTexture-
         // tagged sections (BuildRenderPassDescriptor.hpp's generic mtMask
         // branch collapses both to Detail when GrassTexture isn't set).
-        // GL33's SetTexture (EngineGL33_State.cpp) re-checks the original
-        // bits to pick which texture actually goes on unit 1 -- water tiles
-        // carry SpecularTexture (LandscapeRender.cpp's WaterFlags), not
-        // DetailTexture, and need the specular/bump texture there, not the
-        // ground detail texture.
+        // Water tiles currently carry SpecularTexture rather than IsWater
+        // (LandscapeRender.cpp's WaterFlags), so they arrive through this
+        // generic Detail family. For Metal, route that legacy marker to the
+        // dedicated water bump map and water equation.
         const bool isDetailTagged = render::Has(spec.backend, render::Backend::DetailTexture);
-        // Only flag true ground-Detail sections for fsMeshOpaque/Blend's
-        // detail-multiply (baseLit * detailTex.a * 2) -- confirmed via a
-        // magenta-marker test that water/SpecularTexture sections go through
-        // this exact branch today (no dedicated water shader yet, see
-        // EngineMTLBootstrap.cpp's Water/Detail/Grass pipeline TODO). That
-        // formula treats the secondary texture's alpha as a ground-texture
-        // brightness multiplier; for a bump/normal map (water's case) alpha
-        // is unrelated and can crush the lit water color toward black. GL33's
-        // dedicated PSWater shader instead adds a bump-driven specular
-        // highlight, never multiplying toward black. Leaving flags[1] at its
-        // default 0 here falls through to applyDetailMode's plain-baseLit
-        // branch -- correct brightness, just without the specular sparkle,
-        // until a real water shader lands.
         if (isDetailTagged)
             _tlObject.flags[1] = 1.0f;
         if (_textBank)
         {
-            TextureMTL* tex = isDetailTagged ? _textBank->GetDetailTexture() : _textBank->GetSpecularTexture();
+            TextureMTL* tex = isDetailTagged ? _textBank->GetDetailTexture() : _textBank->GetWaterBumpMap();
             if (tex)
             {
                 _textBank->UseMipmap(tex, 0, 0);
                 _tlSecondaryTexture = tex->GpuHandle();
+                if (!isDetailTagged && _tlSecondaryTexture != 0)
+                    _tlObject.flags[1] = 3.0f;
             }
         }
     }
@@ -920,13 +937,11 @@ void EngineMTL::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelT
         _tlFrame.fogColor[1] = _fogColor.G();
         _tlFrame.fogColor[2] = _fogColor.B();
         _tlFrame.fogColor[3] = 1.0f;
-        // GL33 uploads zero to this shader slot for ordinary mesh draws; keep
-        // Metal's constant-buffer layout identical without feeding the absolute
-        // camera position into camera-relative lighting math.
-        _tlFrame.gl33CamPosZero[0] = 0.0f;
-        _tlFrame.gl33CamPosZero[1] = 0.0f;
-        _tlFrame.gl33CamPosZero[2] = 0.0f;
-        _tlFrame.gl33CamPosZero[3] = 0.0f;
+        const Vector3 waterSunDir = sun->SunDirection();
+        _tlFrame.waterSunDirAndTime[0] = static_cast<float>(waterSunDir.X());
+        _tlFrame.waterSunDirAndTime[1] = static_cast<float>(waterSunDir.Y());
+        _tlFrame.waterSunDirAndTime[2] = static_cast<float>(waterSunDir.Z());
+        _tlFrame.waterSunDirAndTime[3] = Glob.time.toFloat();
 
         _tlFrameValid = true;
     }

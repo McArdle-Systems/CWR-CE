@@ -34,6 +34,11 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "Failed to initialize Metal bootstrap\n");
         return 1;
     }
+    if (!engine.ValidateMeshPipelines())
+    {
+        std::fprintf(stderr, "Failed to compile Metal mesh pipelines\n");
+        return 1;
+    }
 
     std::printf("Window open. Clearing to cornflower blue. Close the window or press Esc to quit.\n");
 
