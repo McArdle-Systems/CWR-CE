@@ -238,6 +238,22 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [
     float3 toSun = -frame.sunDirAndEnabled.xyz;
     float NdotL = max(dot(worldNorm, toSun), 0.0) * sunEnabled;
     float3 lit = obj.ambient.rgb + NdotL * obj.diffuse.rgb + obj.emissive.rgb;
+    // Alpha mirrors GL33's litColor.a (EngineGL33_Shaders.cpp's s_vsTransformGLSL:
+    // emissive.a + ambient.a*sunEn.x + diffuse.a*NdotL*sunEn.x, clamped 0-1), not
+    // just obj.ambient.w alone. Sections whose material ambient carries a
+    // sub-1.0 alpha (e.g. a shared cockpit-interior material class) but whose
+    // emissive/diffuse terms bring the lit sum back up to ~1 render solid on
+    // GL33 once clamped; using ambient.w in isolation left Metal's mesh path
+    // under-driving that same clamp, so those sections were forced into
+    // fsMeshBlend (PrepareTriangleTL's forceBlend, gated on the shared
+    // BuildRenderPassDescriptor IsAlpha/AlphaFog bits both backends honor
+    // identically) and rendered visibly translucent -- confirmed by an M1A1
+    // interior (pilot_podlaha floor, driv_side1/2 walls) where GL33 and Metal
+    // compute the identical ambient.a=0.63 but only Metal showed the
+    // interior as partially see-through. Shadow draws don't reach this
+    // formula at all (moved to a dedicated unlit vsShadow, see Shadow.cpp's
+    // DrawShadow comment), so there's no shadow-alpha regression risk here.
+    float litAlpha = clamp(obj.ambient.w + NdotL * obj.diffuse.w + obj.emissive.w, 0.0, 1.0);
 
     // Local point/spot lights (street lamps, vehicle headlights) -- ported
     // from GL33's per-vertex loop (EngineGL33_Shaders.cpp's
@@ -315,16 +331,6 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [
         specOut = obj.specular.rgb * pow(NdotH, specPow) * sunEnabled;
     }
 
-    // Material alpha. obj.ambient.w carries TLMaterial::ambient's alpha
-    // through unmodified from EngineMTL::SetMaterial; for ordinary opaque
-    // materials (CreateMaterialNormal, TransLight.cpp:1413) that's always 1,
-    // but Shadow.cpp's shadow pass (Shadow.cpp:605) deliberately sets
-    // ambient/diffuse to Color(0,0,0,shadowFactor) expecting a translucent
-    // black blend. Hardcoding this to 1.0 (as before) silently turned every
-    // shadow draw fully opaque -- same blend factors (SourceAlpha/
-    // OneMinusSourceAlpha, already set on pipelineStateTL) just never got
-    // anything but 1 to blend with, so shadows painted flat black over
-    // whatever they overlapped instead of darkening it.
     VSOutMesh out;
     out.position = clipPos;
     out.uv = v.uv;
@@ -337,7 +343,7 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [
         out.uv = v.uv + float2(wave1 * 0.5, wave1);
         out.uv1 = v.uv * 64.0 + float2(wave2 * 0.5, wave2);
     }
-    out.color = float4(lit, obj.ambient.w);
+    out.color = float4(lit, litAlpha);
     out.specColor = float4(clamp(specOut, 0.0, 1.0), 0.0);
     out.fogFactor = fogFactor;
     // obj.flags.x is 1.0 only for AlphaStats::Cutout textures (set by
