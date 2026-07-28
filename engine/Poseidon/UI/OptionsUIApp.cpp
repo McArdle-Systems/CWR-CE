@@ -620,6 +620,7 @@ void DisplayMain::OnChildDestroyed(int idd, int exit)
                 if (item->data.GetLength() == 0)
                 {
                     SetBaseDirectory("");
+                    SetMission(world, mission, ResolveArcadeMissionSubdir(world, mission));
                 }
                 else
                 {
@@ -628,8 +629,8 @@ void DisplayMain::OnChildDestroyed(int idd, int exit)
                     RString src = GetCampaignSaveDirectory(item->data) + RString("objects.sav");
                     RString dst = GetCampaignSaveDirectory("") + RString("objects.sav");
                     ::CopyFile(src, dst, FALSE);
+                    SetMission(world, mission);
                 }
-                SetMission(world, mission);
 
                 GStats.ClearAll();
                 Display::OnChildDestroyed(idd, exit);
@@ -669,6 +670,7 @@ void DisplayMain::OnChildDestroyed(int idd, int exit)
                 if (item->data.GetLength() == 0)
                 {
                     SetBaseDirectory("");
+                    SetMission(world, mission, ResolveArcadeMissionSubdir(world, mission));
                 }
                 else
                 {
@@ -677,8 +679,8 @@ void DisplayMain::OnChildDestroyed(int idd, int exit)
                     RString src = GetCampaignSaveDirectory(item->data) + RString("objects.sav");
                     RString dst = GetCampaignSaveDirectory("") + RString("objects.sav");
                     ::CopyFile(src, dst, FALSE);
+                    SetMission(world, mission);
                 }
-                SetMission(world, mission);
 
                 Display::OnChildDestroyed(idd, exit);
                 GLOB_WORLD->SwitchLandscape(GetWorldName(Glob.header.worldname));
@@ -748,6 +750,7 @@ void DisplayMain::OnChildDestroyed(int idd, int exit)
                 else
                 {
                     RString mission = lbox->GetData(sel);
+                    dir = ResolveSPMissionSubdir(disp->GetDirectory(), mission);
                     if (!ProcessTemplateName(mission, dir))
                     {
                         Display::OnChildDestroyed(idd, exit);
@@ -781,6 +784,7 @@ void DisplayMain::OnChildDestroyed(int idd, int exit)
                     }
                     else
                     {
+                        dir = ResolveSPMissionSubdir(disp->GetDirectory(), mission);
                         CurrentMissionViewDistance =
                             MissionLanguageDetector::DetectPreview(dir + mission + RString("\\")).missionViewDistance;
                     }

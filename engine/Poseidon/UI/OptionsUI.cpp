@@ -882,6 +882,42 @@ void SetMission(RString world, RString mission, RString subdir)
     UpdateCurrentMissionViewDistance();
 }
 
+RString ResolveArcadeMissionSubdir(RString world, RString mission)
+{
+    // An arcade single mission may live unpacked under an active mod's missions/. Return the owning
+    // root's missions subdir so SetMission loads it from there; fall back to the base game's missions/.
+    struct Ctx
+    {
+        RString world;
+        RString mission;
+        RString result;
+    } ctx{world, mission, GetMissionsDir()};
+
+    ModSystem::EnumDirectories(
+        [](RStringB dir, void* context) -> bool
+        {
+            if (dir.GetLength() == 0)
+            {
+                return false;
+            }
+            auto* c = static_cast<Ctx*>(context);
+            const RString subdir = RString((const char*)dir) + RString("/") + GetMissionsDir();
+            const RString probe = subdir + c->mission + RString(".") + c->world;
+            _finddata_t info;
+            const intptr_t h = _findfirst(probe, &info);
+            if (h != -1)
+            {
+                _findclose(h);
+                c->result = subdir;
+                return true;
+            }
+            return false;
+        },
+        &ctx);
+
+    return ctx.result;
+}
+
 void SetMission(RString world, RString mission)
 {
     SetMission(world, mission, GetMissionsDir());
@@ -928,6 +964,41 @@ static bool FindMissionPboCallback(RStringB dir, void* ctx)
         return true;
     }
     return false;
+}
+
+struct FindCutsceneRootContext
+{
+    const char* rel; // "Anims\\<name>.<world>\\mission.sqm"
+    RString result;  // "<mod>\\Anims\\" subdir when a mod carries the cutscene
+};
+static bool FindCutsceneRootCallback(RStringB dir, void* ctx)
+{
+    auto* c = static_cast<FindCutsceneRootContext*>(ctx);
+    if (dir.GetLength() == 0)
+        return false; // base dir -> the anims/ bank is the fallback
+    char probe[1024];
+    snprintf(probe, sizeof(probe), "%s\\%s", (const char*)dir, c->rel);
+    if (!QIFStreamB::FileExist(probe))
+        return false;
+    char sub[1024];
+    snprintf(sub, sizeof(sub), "%s\\Anims\\", (const char*)dir);
+    c->result = sub;
+    return true;
+}
+
+RString ResolveCutsceneAnimsSubdir(RString world, RString name)
+{
+    // A "..\addons\..." cutscene is a packed-bank path resolved through the base anims/ mount; only a
+    // bare cutscene name lives in a mod's Anims/ folder, hosted like any other mission type.
+    if (strpbrk(name, "\\/"))
+        return GetAnimsDir();
+    char rel[512];
+    snprintf(rel, sizeof(rel), "Anims\\%s.%s\\mission.sqm", (const char*)name, (const char*)world);
+    FindCutsceneRootContext ctx;
+    ctx.rel = rel;
+    if (::EnumModDirectories(FindCutsceneRootCallback, &ctx))
+        return ctx.result;
+    return GetAnimsDir();
 }
 
 static RString GetSingleMissionBankPrefix(RString filename, RString island, bool uniquePrefix)
@@ -2240,9 +2311,10 @@ void StartRandomCutscene(RString world)
 
     RString name = cls[i];
 
-    SetMission(world, name, GetAnimsDir());
-    //	SetCampaign("");
+    // A mod that ships Anims/<name>.<world> hosts the cutscene from its own root; else the base
+    // anims/ bank. Clear the base dir first so SetMission's own reads resolve from the same place.
     SetBaseDirectory("");
+    SetMission(world, name, ResolveCutsceneAnimsSubdir(world, name));
 
     bool parsed = ParseIntro();
 
