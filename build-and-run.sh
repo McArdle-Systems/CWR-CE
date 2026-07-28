@@ -7,6 +7,16 @@ PRESET="${PRESET:-macos-arm64-clang-rwdi}"
 TARGET="${TARGET:-PoseidonGame}"
 JOBS="${JOBS:-8}"
 CONTENT_DIR="${CONTENT_DIR:-packages/Remastered}"
+MODS_DIR="${MODS_DIR:-/Users/alex/Projects/CWR-arm64/packages/Mods}"
+if [[ -z "${MODS+x}" ]]; then
+    MOD_FOLDERS=()
+    if [[ -d "$MODS_DIR" ]]; then
+        while IFS= read -r -d '' d; do
+            MOD_FOLDERS+=("$(basename "$d")")
+        done < <(find "$MODS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+    fi
+    MODS="$(IFS=';'; echo "${MOD_FOLDERS[*]:-}")"
+fi
 RENDER="${RENDER:-mtl}"
 CONFIGURE="${CONFIGURE:-1}"
 DEFAULT_TEST_MISSION="${HOME}/Documents/Cold War Assault/missions/benchmark.abel"
@@ -29,6 +39,10 @@ Environment overrides:
   TARGET       CMake target to build (default: $TARGET)
   JOBS         Parallel build jobs (default: $JOBS)
   CONTENT_DIR  Game content directory passed with -C (default: $CONTENT_DIR)
+  MODS_DIR     Mods parent dir passed with --mods-dir, scanned by the in-game
+               Mods browser (default: $MODS_DIR)
+  MODS         Mod path(s) passed with --mod, semicolon-separated (default:
+               every folder directly inside MODS_DIR)
   RENDER       Renderer passed with --render (default: $RENDER)
   CONFIGURE    Run cmake --preset first, 1 or 0 (default: $CONFIGURE)
 
@@ -46,6 +60,7 @@ Examples:
   ./build-and-run.sh --test-mission="\$HOME/.local/share/Cold War Assault/missions/benchmark.abel"
   ./build-and-run.sh --test-mission --log-file
   RENDER=gl33 ./build-and-run.sh --no-sound
+  MODS="@ModA;@ModB" ./build-and-run.sh
   CONFIGURE=0 JOBS=12 ./build-and-run.sh
 EOF
 }
@@ -120,9 +135,15 @@ fi
 
 cmake --build "$BUILD_DIR" --target "$TARGET" -j "$JOBS"
 
+MOD_ARGS=()
+if [[ -n "$MODS" ]]; then
+    MOD_ARGS=(--mod "$MODS" --mods-dir "$MODS_DIR")
+fi
+
 exec "$GAME_BIN" \
     --no-splash \
     -C "$CONTENT_DIR" \
+    "${MOD_ARGS[@]}" \
     --render "$RENDER" \
     --dev \
     --show-fps \
