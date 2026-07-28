@@ -49,14 +49,8 @@ class SDLEventWindow
             Poseidon::TouchInput_UpdateSafeAreaFromWindow(_sdlWindow);
             if (_mouseGrab)
                 SDL_SetWindowRelativeMouseMode(_sdlWindow, true);
-#ifndef POSEIDON_TARGET_IOS
-            // Desktop only: keeps the OS IME ready for chat/console text
-            // entry. On iOS this is what makes the on-screen keyboard pop
-            // up immediately on launch with no way to dismiss it -- this
-            // engine has no touch UI for it yet (see EngineMTL.hpp, the
-            // only iOS user of this header-only class).
-            SDL_StartTextInput(_sdlWindow);
-#endif
+            // Baseline off; ControlsContainer::SetFocus arms it per focused control.
+            SDL_StopTextInput(_sdlWindow);
         }
 
         extern void SetMouseAcquired(bool acquired);
