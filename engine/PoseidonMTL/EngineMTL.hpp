@@ -87,6 +87,18 @@ class EngineMTL : public Engine
     void SetMouseGrab(bool grab) override { _eventWindow.SetMouseGrab(grab); }
     bool IsMouseGrabbed() const override { return _eventWindow.IsMouseGrabbed(); }
 
+    void StartTextInput() override
+    {
+        if (_sdlWindow)
+            SDL_StartTextInput(_sdlWindow);
+    }
+    void StopTextInput() override
+    {
+        if (_sdlWindow)
+            SDL_StopTextInput(_sdlWindow);
+    }
+    bool IsTextInputActive() const override { return _sdlWindow && SDL_TextInputActive(_sdlWindow); }
+
     RString GetDebugName() const override;
     RString GetRendererName() const override;
 
