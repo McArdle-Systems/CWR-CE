@@ -24,6 +24,15 @@ constexpr float kStanceButtonX = 0.042f;
 constexpr float kStanceButtonY = 0.720f;
 constexpr float kEquipmentButtonX = 0.958f;
 constexpr float kEquipmentButtonY = 0.173f;
+constexpr float kPauseButtonX = 0.0422f;
+constexpr float kPauseButtonY = 0.0550f;
+// Centers of the +/- radial's two zones once revealed by a Pause hold, at
+// the 1920x1080 viewport these tests use throughout (see
+// BuildPauseExpandZones/kPauseRadialCenterDeg in TouchInput.cpp).
+constexpr float kPauseTimeDecX = 0.0829f;
+constexpr float kPauseTimeDecY = 0.0757f;
+constexpr float kPauseTimeIncX = 0.0539f;
+constexpr float kPauseTimeIncY = 0.1273f;
 
 SDL_TouchFingerEvent Finger(SDL_EventType type, SDL_FingerID id, float x, float y)
 {
@@ -802,6 +811,120 @@ TEST_CASE("TouchInput: stance button hold pulses Z for exactly one frame", "[inp
     CHECK_FALSE(TouchInput_GetDebugState().stancePulseActive);
     GInput.keyboard.Update(17, 16, true);
     CHECK(GInput.keyboard.keys[SDL_SCANCODE_Z] == 0.0f);
+}
+
+TEST_CASE("TouchInput: pause button quick tap fires pause/cancel without opening the radial", "[input][touch]")
+{
+    TouchFixture fixture;
+    // Outside gameplay, EmitPauseTap also emits a real Escape tap - the
+    // most directly observable side effect, same reasoning as the Stance
+    // tests using Q/Z.
+    TouchInput_TestSetGameplaySceneOverride(true, false);
+    GInput.keyboard.ForgetKeys();
+
+    Glob.uiTime = Poseidon::Foundation::UITime(1000);
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, kPauseButtonX, kPauseButtonY));
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK_FALSE(TouchInput_GetDebugState().pauseRadialActive);
+
+    // Quick release, well under kPauseHoldSeconds.
+    Glob.uiTime = Poseidon::Foundation::UITime(1100);
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_UP, 1, kPauseButtonX, kPauseButtonY));
+
+    GInput.keyboard.Update(Poseidon::Foundation::GlobalTickCount(), 16, true);
+    CHECK(GInput.keyboard.keysToDo[SDL_SCANCODE_ESCAPE]);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_MINUS]);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_EQUALS]);
+}
+
+TEST_CASE("TouchInput: pause button hold past threshold reveals the +/- radial", "[input][touch]")
+{
+    TouchFixture fixture;
+    TouchInput_TestSetGameplaySceneOverride(true, true);
+    GInput.keyboard.ForgetKeys();
+
+    Glob.uiTime = Poseidon::Foundation::UITime(1000);
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, kPauseButtonX, kPauseButtonY));
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK_FALSE(TouchInput_GetDebugState().pauseRadialActive);
+
+    // Cross the hold threshold while still held (kPauseHoldSeconds is
+    // 0.45s; 1s of elapsed game time is comfortably past it).
+    Glob.uiTime = Poseidon::Foundation::UITime(2000);
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK(TouchInput_GetDebugState().pauseRadialActive);
+
+    // The hold itself must not fire pause/cancel while still held.
+    GInput.keyboard.Update(Poseidon::Foundation::GlobalTickCount(), 16, true);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_ESCAPE]);
+}
+
+TEST_CASE("TouchInput: pause button hold and release over + emits time-accel increase", "[input][touch]")
+{
+    TouchFixture fixture;
+    TouchInput_TestSetGameplaySceneOverride(true, true);
+    GInput.keyboard.ForgetKeys();
+
+    Glob.uiTime = Poseidon::Foundation::UITime(1000);
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, kPauseButtonX, kPauseButtonY));
+    Glob.uiTime = Poseidon::Foundation::UITime(2000);
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK(TouchInput_GetDebugState().pauseRadialActive);
+
+    // Drag onto the "+" zone, then release there.
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_MOTION, 1, kPauseTimeIncX, kPauseTimeIncY));
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_UP, 1, kPauseTimeIncX, kPauseTimeIncY));
+    CHECK_FALSE(TouchInput_GetDebugState().pauseRadialActive);
+
+    GInput.keyboard.Update(Poseidon::Foundation::GlobalTickCount(), 16, true);
+    CHECK(GInput.keyboard.keysToDo[SDL_SCANCODE_EQUALS]);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_MINUS]);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_ESCAPE]);
+}
+
+TEST_CASE("TouchInput: pause button hold and release over - emits time-accel decrease", "[input][touch]")
+{
+    TouchFixture fixture;
+    TouchInput_TestSetGameplaySceneOverride(true, true);
+    GInput.keyboard.ForgetKeys();
+
+    Glob.uiTime = Poseidon::Foundation::UITime(1000);
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, kPauseButtonX, kPauseButtonY));
+    Glob.uiTime = Poseidon::Foundation::UITime(2000);
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK(TouchInput_GetDebugState().pauseRadialActive);
+
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_MOTION, 1, kPauseTimeDecX, kPauseTimeDecY));
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_UP, 1, kPauseTimeDecX, kPauseTimeDecY));
+    CHECK_FALSE(TouchInput_GetDebugState().pauseRadialActive);
+
+    GInput.keyboard.Update(Poseidon::Foundation::GlobalTickCount(), 16, true);
+    CHECK(GInput.keyboard.keysToDo[SDL_SCANCODE_MINUS]);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_EQUALS]);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_ESCAPE]);
+}
+
+TEST_CASE("TouchInput: pause button hold and release without hovering an item fires nothing", "[input][touch]")
+{
+    TouchFixture fixture;
+    TouchInput_TestSetGameplaySceneOverride(true, true);
+    GInput.keyboard.ForgetKeys();
+
+    Glob.uiTime = Poseidon::Foundation::UITime(1000);
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, kPauseButtonX, kPauseButtonY));
+    Glob.uiTime = Poseidon::Foundation::UITime(2000);
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK(TouchInput_GetDebugState().pauseRadialActive);
+
+    // Release right where the finger already is - the anchor button itself,
+    // outside both expand zones.
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_UP, 1, kPauseButtonX, kPauseButtonY));
+    CHECK_FALSE(TouchInput_GetDebugState().pauseRadialActive);
+
+    GInput.keyboard.Update(Poseidon::Foundation::GlobalTickCount(), 16, true);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_MINUS]);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_EQUALS]);
+    CHECK_FALSE(GInput.keyboard.keysToDo[SDL_SCANCODE_ESCAPE]);
 }
 
 TEST_CASE("TouchInput: action hold with drag does not trigger action on release", "[input][touch]")
