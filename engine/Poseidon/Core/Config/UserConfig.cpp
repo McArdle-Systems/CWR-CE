@@ -2,10 +2,12 @@
 
 #include <Poseidon/Core/Config/UserConfig.hpp>
 
+#include <Poseidon/IO/Filesystem/Utf8Paths.hpp>
 #include <Poseidon/IO/ParamFile/ParamFile.hpp>
 #include <Poseidon/Foundation/Platform/GamePaths.hpp>
 
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <Poseidon/Foundation/Common/GamePaths.hpp>
@@ -33,22 +35,18 @@ void UserConfig_LoadDifficulties(UserConfig& uc)
     uc.InitDifficulties();
 
     ParamFile userCfg;
-    userCfg.Parse(::Poseidon::GetUserParams());
-
     const std::string path = DifficultyConfigPath();
     std::error_code ec;
-    const bool hasDifficultyCfg = std::filesystem::exists(path, ec);
-    ParamFile legacyCfg;
-    if (hasDifficultyCfg)
-        legacyCfg.Parse(RString(path.c_str()));
+    if (std::filesystem::exists(FilesystemPathFromUtf8(path), ec))
+        userCfg.Parse(RString(path.c_str()));
+    else
+        userCfg.Parse(::Poseidon::GetUserParams());
 
     DifficultyDesc* descs = GetDifficultyDescs();
     for (int i = 0; i < DTN; i++)
     {
         RString name = RString("diff") + RString(descs[i].name);
         const ParamEntry* cfg = userCfg.FindEntry(name);
-        if (!cfg && hasDifficultyCfg)
-            cfg = legacyCfg.FindEntry(name);
         if (cfg)
         {
             // Restore both modes unconditionally — SaveDifficulties writes cadet AND veteran for
@@ -61,37 +59,27 @@ void UserConfig_LoadDifficulties(UserConfig& uc)
     }
 
     const ParamEntry* entry = userCfg.FindEntry("showTitles");
-    if (!entry && hasDifficultyCfg)
-        entry = legacyCfg.FindEntry("showTitles");
     if (entry)
         uc.showTitles = *entry;
-
-    entry = userCfg.FindEntry("easyMode");
-    if (!entry && hasDifficultyCfg)
-        entry = legacyCfg.FindEntry("easyMode");
-    if (entry)
-        uc.easyMode = *entry;
 }
 
 void UserConfig_SaveDifficulties(const UserConfig& uc)
 {
-    ParamFile userCfg;
-    const RString path = ::Poseidon::GetUserParams();
-    userCfg.Parse(path);
+    const std::string path = DifficultyConfigPath();
+    std::ofstream out(FilesystemPathFromUtf8(path), std::ios::out | std::ios::trunc);
+    if (!out.is_open())
+    {
+        LOG_WARN(Config, "DifficultyConfig: failed to open '{}' for writing", path);
+        return;
+    }
 
     DifficultyDesc* descs = GetDifficultyDescs();
     for (int i = 0; i < DTN; i++)
-    {
-        RString name = RString("diff") + RString(descs[i].name);
-        ParamEntry* entry = userCfg.AddArray(name);
-        entry->Clear();
-        entry->AddValue(uc.cadetDifficulty[i]);
-        entry->AddValue(uc.veteranDifficulty[i]);
-    }
-    userCfg.Add("showTitles", uc.showTitles);
-    userCfg.Add("easyMode", uc.easyMode);
+        out << "diff" << descs[i].name << "[]={" << static_cast<int>(uc.cadetDifficulty[i]) << ","
+            << static_cast<int>(uc.veteranDifficulty[i]) << "};\n";
+    out << "showTitles=" << static_cast<int>(uc.showTitles) << ";\n";
 
-    if (userCfg.Save(path) != LSOK)
-        LOG_WARN(Config, "DifficultyConfig: failed to write '{}'", (const char*)path);
+    if (!out.good())
+        LOG_WARN(Config, "DifficultyConfig: failed to write '{}'", path);
 }
 } // namespace Poseidon

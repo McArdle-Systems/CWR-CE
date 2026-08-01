@@ -222,16 +222,8 @@ void NetworkServer::OnSendComplete(DWORD msgID, bool ok)
 
 void NetworkServer::OnCreatePlayer(int player, bool botClient, const char* name)
 {
-    if (_state >= NGSTransferMission && !_missionHeader.joinInProgress)
+    if (_sessionLocked)
     {
-        // Game is loading or in progress and JIP is not enabled — reject late joiners
-        LOG_INFO(Network, "Rejecting player {} — game in progress without JIP (state={})", name, (int)_state);
-        _server->KickOff(player, NTRKicked);
-        return;
-    }
-    if (_sessionLocked && !_missionHeader.joinInProgress)
-    {
-        // session is locked and JIP is not enabled
         _server->KickOff(player, NTRKicked);
         return;
     }
@@ -254,6 +246,7 @@ void NetworkServer::OnCreatePlayer(int player, bool botClient, const char* name)
     }
 
     NetworkPlayerInfo* pInfo = OnPlayerCreate(player, name);
+    pInfo->waitingForMission = _state >= NGSTransferMission && !_missionHeader.joinInProgress;
 
     if (isJip)
     {
@@ -686,11 +679,8 @@ void NetworkServer::CreateIdentity(PlayerIdentity& ident, Ref<SquadIdentity> squ
             info->state = NGSPrepareSide;
             info->missionFileValid = false;
         }
-        // Send state to client. Cap at NGSPrepareRole for clients joining
-        // during loading/play — sending NGSPlay would skip role selection UI
-        // and the client would never detect occupied slots.
         NetworkGameState stateToSend = _state;
-        if (stateToSend > NGSPrepareRole)
+        if (!info->waitingForMission && stateToSend > NGSPrepareRole)
         {
             stateToSend = NGSPrepareRole;
         }
