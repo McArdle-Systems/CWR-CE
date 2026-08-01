@@ -122,7 +122,7 @@ RString GetUserDirectory()
 {
     std::string dir =
         ProfileManager::GetProfileDirPath(GamePaths::Instance().UserDir(), std::string(Glob.header.playerName));
-    std::filesystem::create_directories(dir);
+    ProfileManager::EnsureProfileDirectory(GamePaths::Instance().UserDir(), std::string(Glob.header.playerName));
     return dir.c_str();
 }
 
@@ -282,6 +282,7 @@ RString GetCampaignSaveDirectory(RString campaign)
 {
     if (campaign.GetLength() == 0)
     {
+        return GetTmpSaveDirectory();
     }
     RString dir = GetUserDirectory() + RString("Saved/campaigns/") + campaign + RString("/");
     CreatePath(dir);
