@@ -70,6 +70,11 @@ constexpr float kTapMaxSeconds = 0.30f;
 // more slack for a real screen tap (or Simulator click latency) to land
 // under it.
 constexpr float kStanceHoldSeconds = 0.45f;
+// Pause button: a press shorter than this is a tap (pause/cancel, as
+// before); at or beyond it, reveal the +/- time-acceleration radial
+// instead of firing pause immediately. Reuses the Stance button's
+// threshold/rationale - a deliberate hold vs. a real screen tap.
+constexpr float kPauseHoldSeconds = 0.45f;
 // Move-stick deflection (0..1, see kStickRadius) above which touch movement
 // engages real sprint (UATurbo) rather than the default jog. Deliberately
 // close to full deflection - sprint should read as "pushed all the way",
@@ -106,6 +111,11 @@ constexpr float kEquipmentRadialMinSpanDeg = 58.0f;
 constexpr float kEquipmentRadialSpanStepDeg = 23.0f;
 constexpr float kEquipmentRadialMinDistance = 1.65f;
 constexpr float kEquipmentRadialDistanceStep = 0.36f;
+// Pause's radial mirrors Equipment's fan geometry (reuses
+// kEquipmentRadialMinSpanDeg/MinDistance/DistanceStep) but centered
+// down-right instead of down-left, since Pause sits at the top-left
+// corner instead of Equipment's top-right.
+constexpr float kPauseRadialCenterDeg = 45.0f;
 
 #ifdef POSEIDON_TARGET_IOS
 constexpr bool kDefaultEnabled = true;
@@ -132,6 +142,13 @@ enum class EquipmentItem
     Watch,
     Binocular,
     NightVision,
+};
+
+enum class PauseExpandItem
+{
+    None,
+    TimeDec,
+    TimeInc,
 };
 
 struct Finger
@@ -161,6 +178,14 @@ struct ButtonZone
 struct EquipmentZone
 {
     EquipmentItem item = EquipmentItem::None;
+    float x = 0.0f;
+    float y = 0.0f;
+    float r = 0.0f;
+};
+
+struct PauseExpandZone
+{
+    PauseExpandItem item = PauseExpandItem::None;
     float x = 0.0f;
     float y = 0.0f;
     float r = 0.0f;
@@ -241,6 +266,13 @@ bool sEquipmentRadialActive = false;
 SDL_FingerID sEquipmentFingerId = 0;
 EquipmentItem sEquipmentHover = EquipmentItem::None;
 EquipmentItem sLatchedEquipment = EquipmentItem::None;
+// Pause radial: unlike Equipment (which opens the instant the finger goes
+// down), this only activates once the hold crosses kPauseHoldSeconds - see
+// the per-frame check in TouchInput_ProcessFrame - so a quick tap still
+// falls through to the plain pause/cancel action fired on release.
+bool sPauseRadialActive = false;
+SDL_FingerID sPauseFingerId = 0;
+PauseExpandItem sPauseHover = PauseExpandItem::None;
 int sViewportW = 1920;
 int sViewportH = 1080;
 float sAimSensitivity = 1.0f;
@@ -735,6 +767,51 @@ EquipmentItem HitEquipmentItem(float x, float y)
     return EquipmentItem::None;
 }
 
+ButtonZone GetPauseAnchor(int width, int height)
+{
+    return BuildButtonZones(width, height)[(int)TouchButton::Pause];
+}
+
+int BuildPauseExpandZones(PauseExpandZone* zones, int maxZones, int width, int height)
+{
+    constexpr PauseExpandItem items[2] = {PauseExpandItem::TimeDec, PauseExpandItem::TimeInc};
+    constexpr int count = 2;
+    if (maxZones <= 0)
+        return 0;
+
+    const ButtonZone anchor = GetPauseAnchor(width, height);
+    const float span = kEquipmentRadialMinSpanDeg;
+    const float start = kPauseRadialCenterDeg - span * 0.5f;
+    const float step = span / (float)(count - 1);
+    const float distance = anchor.r * (kEquipmentRadialMinDistance + kEquipmentRadialDistanceStep * (float)(count - 1));
+    const int outCount = std::min(count, maxZones);
+    for (int i = 0; i < outCount; i++)
+    {
+        const float deg = start + step * (float)i;
+        const float rad = deg * (3.14159265359f / 180.0f);
+        zones[i].item = items[i];
+        zones[i].x = Clamp01(anchor.x + std::cos(rad) * distance * (float)height / (float)std::max(1, width));
+        zones[i].y = Clamp01(anchor.y + std::sin(rad) * distance);
+        zones[i].r = anchor.r * 0.82f;
+    }
+    return outCount;
+}
+
+PauseExpandItem HitPauseExpandItem(float x, float y)
+{
+    PauseExpandZone zones[2];
+    const int count = BuildPauseExpandZones(zones, 2, sViewportW, sViewportH);
+    for (int i = 0; i < count; i++)
+    {
+        const float dx = (x - zones[i].x) * (float)std::max(1, sViewportW);
+        const float dy = (y - zones[i].y) * (float)std::max(1, sViewportH);
+        const float r = zones[i].r * (float)std::max(1, sViewportH);
+        if (Length(dx, dy) <= r)
+            return zones[i].item;
+    }
+    return PauseExpandItem::None;
+}
+
 TouchButton HitButton(float x, float y)
 {
     for (const ButtonZone& zone : BuildButtonZones(sViewportW, sViewportH))
@@ -1171,6 +1248,13 @@ void ResetEquipmentRadial()
     sEquipmentHover = EquipmentItem::None;
 }
 
+void ResetPauseRadial()
+{
+    sPauseRadialActive = false;
+    sPauseFingerId = 0;
+    sPauseHover = PauseExpandItem::None;
+}
+
 void EmitKeyTap(SDL_Scancode sc)
 {
     SDLInput_BufferKeyEvent(sc, true, Foundation::GlobalTickCount());
@@ -1233,6 +1317,28 @@ void EmitEquipmentItem(EquipmentItem item)
         case EquipmentItem::NightVision:
             SetLatchedEquipment(EquipmentItem::None);
             EmitKeyTap(SDL_SCANCODE_N);
+            break;
+        default:
+            break;
+    }
+}
+
+void EmitPauseTap()
+{
+    SDLInput_BufferControllerUiAction(IsGameplayScene() ? ControllerUiAction::Pause : ControllerUiAction::Cancel, true);
+    if (!IsGameplayScene())
+        EmitKeyTap(SDL_SCANCODE_ESCAPE);
+}
+
+void EmitPauseExpandItem(PauseExpandItem item)
+{
+    switch (item)
+    {
+        case PauseExpandItem::TimeDec:
+            EmitKeyTap(SDL_SCANCODE_MINUS);
+            break;
+        case PauseExpandItem::TimeInc:
+            EmitKeyTap(SDL_SCANCODE_EQUALS);
             break;
         default:
             break;
@@ -1311,11 +1417,8 @@ void EmitButtonEdge(TouchButton button, bool down)
                 CyclePlayerWeapon();
             break;
         case TouchButton::Pause:
-            if (down)
-                SDLInput_BufferControllerUiAction(
-                    IsGameplayScene() ? ControllerUiAction::Pause : ControllerUiAction::Cancel, true);
-            if (!IsGameplayScene())
-                SDLInput_BufferKeyEvent(SDL_SCANCODE_ESCAPE, down, Foundation::GlobalTickCount());
+            // Handled in EmitFingerButtonEdge, which has the Finger (and so
+            // its startTime) needed to classify tap vs. hold, same as Stance.
             break;
         default:
             break;
@@ -1326,6 +1429,32 @@ void EmitFingerButtonEdge(const Finger& finger, bool down)
 {
     if (finger.role != FingerRole::Button || finger.button == TouchButton::Count)
         return;
+    if (finger.button == TouchButton::Pause)
+    {
+        if (down)
+        {
+            sPauseRadialActive = false;
+            sPauseFingerId = finger.id;
+            sPauseHover = PauseExpandItem::None;
+        }
+        else
+        {
+            if (sPauseRadialActive && sPauseFingerId == finger.id)
+            {
+                // A hold already revealed the radial; only commit the
+                // hovered +/- item, never also fire pause/cancel.
+                if (sPauseHover != PauseExpandItem::None)
+                    EmitPauseExpandItem(sPauseHover);
+            }
+            else
+            {
+                EmitPauseTap();
+            }
+            ResetPauseRadial();
+        }
+        sPrevButtonDown[(int)finger.button] = down;
+        return;
+    }
     if (finger.button == TouchButton::Equipment)
     {
         if (down)
@@ -1594,6 +1723,42 @@ void DrawEquipmentItemIconContrast(Engine* engine, const MipInfo& white, Equipme
     DrawEquipmentItemIcon(engine, white, item, cx, cy, r, icon);
 }
 
+void DrawPauseExpandItemIcon(Engine* engine, const MipInfo& white, PauseExpandItem item, float cx, float cy, float r,
+                             PackedColor color)
+{
+    const float aspect = (float)engine->Height() / (float)std::max(1, engine->Width());
+    const float sx = r * aspect;
+    const float sy = r;
+
+    switch (item)
+    {
+        case PauseExpandItem::TimeDec:
+            DrawLineNorm(engine, cx - sx * 0.44f, cy, cx + sx * 0.44f, cy, color);
+            break;
+        case PauseExpandItem::TimeInc:
+            DrawLineNorm(engine, cx - sx * 0.44f, cy, cx + sx * 0.44f, cy, color);
+            DrawLineNorm(engine, cx, cy - sy * 0.44f, cx, cy + sy * 0.44f, color);
+            break;
+        default:
+            break;
+    }
+}
+
+void DrawPauseExpandItemIconContrast(Engine* engine, const MipInfo& white, PauseExpandItem item, float cx, float cy,
+                                     float r, bool hover)
+{
+    const float dx = 1.2f / (float)std::max(1, engine->Width());
+    const float dy = 1.2f / (float)std::max(1, engine->Height());
+    const PackedColor halo(Color(0.0f, 0.0f, 0.0f, hover ? 0.52f : 0.72f));
+    const PackedColor icon(hover ? Color(0.02f, 0.04f, 0.05f, 0.92f) : Color(0.98f, 1.0f, 1.0f, 0.92f));
+
+    DrawPauseExpandItemIcon(engine, white, item, cx - dx, cy, r, halo);
+    DrawPauseExpandItemIcon(engine, white, item, cx + dx, cy, r, halo);
+    DrawPauseExpandItemIcon(engine, white, item, cx, cy - dy, r, halo);
+    DrawPauseExpandItemIcon(engine, white, item, cx, cy + dy, r, halo);
+    DrawPauseExpandItemIcon(engine, white, item, cx, cy, r, icon);
+}
+
 void DrawTouchButtonFrame(Engine* engine, const MipInfo& white, float cx, float cy, float r, bool pressed)
 {
     const PackedColor outer(Color(0.0f, 0.0f, 0.0f, pressed ? 0.78f : 0.66f));
@@ -1657,6 +1822,9 @@ void TouchInput_HandleFingerEvent(const SDL_TouchFingerEvent& event)
         if (finger->role == FingerRole::Button && finger->button == TouchButton::Equipment && sEquipmentRadialActive &&
             sEquipmentFingerId == finger->id)
             sEquipmentHover = HitEquipmentItem(finger->x, finger->y);
+        if (finger->role == FingerRole::Button && finger->button == TouchButton::Pause && sPauseRadialActive &&
+            sPauseFingerId == finger->id)
+            sPauseHover = HitPauseExpandItem(finger->x, finger->y);
         EmitFingerButtonEdge(*finger, false);
         // Keep the completed gesture state available to the release handler so
         // a scrolled action-button gesture cannot be reclassified as a tap.
@@ -1685,6 +1853,9 @@ void TouchInput_HandleFingerEvent(const SDL_TouchFingerEvent& event)
         if (finger->role == FingerRole::Button && finger->button == TouchButton::Equipment && sEquipmentRadialActive &&
             sEquipmentFingerId == finger->id)
             sEquipmentHover = HitEquipmentItem(finger->x, finger->y);
+        if (finger->role == FingerRole::Button && finger->button == TouchButton::Pause && sPauseRadialActive &&
+            sPauseFingerId == finger->id)
+            sPauseHover = HitPauseExpandItem(finger->x, finger->y);
     }
     if (event.type == SDL_EVENT_FINGER_DOWN)
     {
@@ -1840,6 +2011,13 @@ void TouchInput_ProcessFrame(int viewportWidth, int viewportHeight)
                 sStanceHoldFired = true;
                 StartStancePulse(SDL_SCANCODE_Z);
             }
+            if (finger.button == TouchButton::Pause && !sPauseRadialActive &&
+                Glob.uiTime - finger.startTime >= kPauseHoldSeconds)
+            {
+                sPauseRadialActive = true;
+                sPauseFingerId = finger.id;
+                sPauseHover = PauseExpandItem::None;
+            }
         }
     }
 
@@ -1950,6 +2128,24 @@ void TouchInput_DrawOverlay(Engine* engine)
         }
         return;
     }
+    if (sPauseRadialActive)
+    {
+        PauseExpandZone zones[2];
+        const int count = BuildPauseExpandZones(zones, 2, w, h);
+        const ButtonZone anchor = GetPauseAnchor(w, h);
+        for (int i = 0; i < count; i++)
+        {
+            DrawLineNorm(engine, anchor.x, anchor.y, zones[i].x, zones[i].y,
+                         PackedColor(Color(0.0f, 0.0f, 0.0f, 0.54f)));
+            DrawLineNorm(engine, anchor.x, anchor.y, zones[i].x, zones[i].y,
+                         PackedColor(Color(0.95f, 0.98f, 1.0f, 0.44f)));
+            const bool hover = zones[i].item == sPauseHover;
+            DrawTouchButtonFrame(engine, white, zones[i].x, zones[i].y, zones[i].r, hover);
+            DrawPauseExpandItemIconContrast(engine, white, zones[i].item, zones[i].x, zones[i].y, zones[i].r * 0.82f,
+                                            hover);
+        }
+        return;
+    }
     for (const ButtonZone& zone : BuildButtonZones(w, h))
     {
         if (!IsTouchButtonAvailable(zone.button))
@@ -2023,6 +2219,7 @@ void TouchInput_Reset()
     EndAimFocus();
     SetLatchedEquipment(EquipmentItem::None);
     ResetEquipmentRadial();
+    ResetPauseRadial();
     EndMapPrimary();
     EndMapGesture();
     EndStancePulse();
@@ -2045,6 +2242,7 @@ TouchInputDebugState TouchInput_GetDebugState()
     state.lookActive = RoleActive(FingerRole::Look);
     state.aimFocusActive = sAimFocusActive;
     state.stancePulseActive = sStancePulseActive;
+    state.pauseRadialActive = sPauseRadialActive;
     state.mapPrimaryActive = sMapPrimaryActive;
     state.mapGestureActive = sMapGestureActive;
     state.aimPinchActive = sAimPinchActive;

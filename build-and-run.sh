@@ -7,7 +7,7 @@ PRESET="${PRESET:-macos-arm64-clang-rwdi}"
 TARGET="${TARGET:-PoseidonGame}"
 JOBS="${JOBS:-8}"
 CONTENT_DIR="${CONTENT_DIR:-packages/Remastered}"
-MODS_DIR="${MODS_DIR:-/Users/alex/Projects/CWR-arm64/packages/Mods}"
+MODS_DIR="${MODS_DIR:-/Users/alex/Projects/CWR-CE/packages/Mods}"
 if [[ -z "${MODS+x}" ]]; then
     MOD_FOLDERS=()
     if [[ -d "$MODS_DIR" ]]; then

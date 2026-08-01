@@ -32,6 +32,9 @@ struct TouchInputDebugState
     // Whether the stance button's Q/Z pulse is waiting to be consumed by
     // keyboard processing (see StartStancePulse).
     bool stancePulseActive = false;
+    // Whether a hold on the Pause button has crossed the threshold and
+    // revealed the +/- time-acceleration radial (see kPauseHoldSeconds).
+    bool pauseRadialActive = false;
     bool mapPrimaryActive = false;
     bool mapGestureActive = false;
     bool aimPinchActive = false;
