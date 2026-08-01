@@ -23,14 +23,69 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
     reentered = true;
 
     HANDLE proc = GetCurrentProcess();
-    SymInitialize(proc, nullptr, TRUE);
+
+    char dir[MAX_PATH] = {};
+    if (g_crashDir[0])
+    {
+        snprintf(dir, sizeof(dir), "%s", g_crashDir);
+    }
+    else
+    {
+        DWORD n = GetModuleFileNameA(nullptr, dir, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH)
+            return EXCEPTION_EXECUTE_HANDLER;
+        char* last = std::strrchr(dir, '\\');
+        if (last)
+            *last = 0;
+    }
+
+    char dmp[MAX_PATH];
+    snprintf(dmp, sizeof(dmp), "%s\\crash-%lu.dmp", dir, GetCurrentProcessId());
+    HANDLE f = CreateFileA(dmp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (f != INVALID_HANDLE_VALUE)
+    {
+        MINIDUMP_EXCEPTION_INFORMATION mei = {GetCurrentThreadId(), ep, FALSE};
+        BOOL written = MiniDumpWriteDump(proc, GetCurrentProcessId(), f, MiniDumpWithDataSegs, &mei, nullptr, nullptr);
+        DWORD error = written ? ERROR_SUCCESS : GetLastError();
+        bool normalDump = false;
+        if (!written)
+        {
+            LARGE_INTEGER start = {};
+            if (SetFilePointerEx(f, start, nullptr, FILE_BEGIN) && SetEndOfFile(f))
+            {
+                written = MiniDumpWriteDump(proc, GetCurrentProcessId(), f, MiniDumpNormal, &mei, nullptr, nullptr);
+                error = written ? ERROR_SUCCESS : GetLastError();
+                normalDump = written;
+            }
+            else
+            {
+                error = GetLastError();
+            }
+        }
+        CloseHandle(f);
+        if (written)
+        {
+            fprintf(stderr, "  minidump: %s%s\n", dmp, normalDump ? " (without data segments)" : "");
+        }
+        else
+        {
+            DeleteFileA(dmp);
+            fprintf(stderr, "  minidump failed: %s (error 0x%08lX)\n", dmp, error);
+        }
+    }
+    else
+    {
+        fprintf(stderr, "  minidump failed: %s (error 0x%08lX)\n", dmp, GetLastError());
+    }
 
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     void* addr = ep->ExceptionRecord->ExceptionAddress;
     fprintf(stderr, "\n=== UNHANDLED EXCEPTION 0x%08lX at %p ===\n", code, addr);
     LOG_ERROR(Core, "UNHANDLED EXCEPTION 0x{:08X} at {}", (unsigned)code, addr);
 
-    CONTEXT* ctx = ep->ContextRecord;
+    SymInitialize(proc, nullptr, TRUE);
+    CONTEXT walkContext = *ep->ContextRecord;
+    CONTEXT* ctx = &walkContext;
     STACKFRAME64 frame = {};
 #if defined(_M_X64) || defined(__x86_64__)
     constexpr DWORD machineType = IMAGE_FILE_MACHINE_AMD64;
@@ -78,31 +133,6 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
     }
     fflush(stderr);
 
-    char dir[MAX_PATH] = {};
-    if (g_crashDir[0])
-    {
-        snprintf(dir, sizeof(dir), "%s", g_crashDir);
-    }
-    else
-    {
-        DWORD n = GetModuleFileNameA(nullptr, dir, MAX_PATH);
-        if (n == 0 || n >= MAX_PATH)
-            return EXCEPTION_EXECUTE_HANDLER;
-        char* last = std::strrchr(dir, '\\');
-        if (last)
-            *last = 0;
-    }
-
-    char dmp[MAX_PATH];
-    snprintf(dmp, sizeof(dmp), "%s\\crash-%lu.dmp", dir, GetCurrentProcessId());
-    HANDLE f = CreateFileA(dmp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
-    if (f != INVALID_HANDLE_VALUE)
-    {
-        MINIDUMP_EXCEPTION_INFORMATION mei = {GetCurrentThreadId(), ep, FALSE};
-        MiniDumpWriteDump(proc, GetCurrentProcessId(), f, MiniDumpWithDataSegs, &mei, nullptr, nullptr);
-        CloseHandle(f);
-        fprintf(stderr, "  minidump: %s\n", dmp);
-    }
     return EXCEPTION_EXECUTE_HANDLER;
 }
 } // namespace

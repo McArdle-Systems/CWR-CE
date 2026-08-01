@@ -193,6 +193,8 @@ GameValue TriInGameplay(const GameState*);
 GameValue TriOpenMap(const GameState*);
 GameValue TriShowMap(const GameState*, GameValuePar);
 GameValue TriMapSetScale(const GameState*, GameValuePar);
+GameValue TriMapGetScale(const GameState*);
+GameValue TriBindAction(const GameState*, GameValuePar);
 GameValue TriShowVoiceOverlay(const GameState*, GameValuePar);
 GameValue TriClickBriefingLink(const GameState*, GameValuePar);
 GameValue TriProbeClickBriefingLink(const GameState*, GameValuePar);
@@ -203,6 +205,7 @@ GameValue TriBriefingClickAt(const GameState*, GameValuePar);
 GameValue TriMissionPlayerReady(const GameState*);
 GameValue TriAssertMissionPlayable(const GameState*);
 GameValue TriControlText(const GameState*, GameValuePar);
+GameValue TriControlDisplayText(const GameState*, GameValuePar);
 GameValue TriAssertControlLeftOf(const GameState*, GameValuePar);
 GameValue TriVisibleTexts(const GameState*);
 GameValue TriMpSetupMessage(const GameState*);
@@ -2704,6 +2707,38 @@ GameValue TriVehicleLockState(const GameState* state, GameValuePar arg)
     }
 }
 
+/// triIssueAutoHeal [unit, ambulance] - send the same auto-heal command that
+/// AIGroup::CheckHealth uses, including temporary subgroup creation and rejoin.
+GameValue TriIssueAutoHeal(const GameState* state, GameValuePar arg)
+{
+    const GameArrayType& args = arg;
+    if (args.Size() != 2 || args[0].GetType() != GameObject || args[1].GetType() != GameObject)
+        return GameValue("FAIL:expected_unit_and_ambulance");
+
+    Object* unitObject = GetObject(args[0]);
+    Object* targetObject = GetObject(args[1]);
+    EntityAI* unitEntity = unitObject ? dyn_cast<EntityAI>(unitObject) : nullptr;
+    EntityAI* target = targetObject ? dyn_cast<EntityAI>(targetObject) : nullptr;
+    AIUnit* unit = unitEntity ? unitEntity->CommanderUnit() : nullptr;
+    AIGroup* group = unit ? unit->GetGroup() : nullptr;
+    if (!unitEntity)
+        return GameValue("FAIL:unit_not_entity");
+    if (!unit)
+        return GameValue("FAIL:unit_has_no_ai");
+    if (!group)
+        return GameValue("FAIL:unit_has_no_group");
+    if (!target)
+        return GameValue("FAIL:ambulance_not_entity");
+
+    Command command;
+    command._message = Command::Heal;
+    command._destination = target->Position();
+    command._target = target;
+    command._time = Glob.time + 60;
+    group->SendAutoCommandToUnit(command, unit, true);
+    return GameValue("OK");
+}
+
 /// triRadioEnabled -> bool. World::IsRadioEnabled() — the `enableRadio` scripting
 /// flag (drives radio-sentence audibility via World::SetActiveChannels). Used to
 /// prove enableRadio survives save/load.
@@ -2781,6 +2816,7 @@ INIT_MODULE(GameStateExtTest, 3)
     GGameState.NewFunction(GameFunction(GameString, "triSaveGame", TriSaveGame, GameString));
     GGameState.NewFunction(GameFunction(GameString, "triLoadGame", TriLoadGame, GameString));
     GGameState.NewFunction(GameFunction(GameString, "triVehicleLockState", TriVehicleLockState, GameString));
+    GGameState.NewFunction(GameFunction(GameString, "triIssueAutoHeal", TriIssueAutoHeal, GameArray));
     GGameState.NewNularOp(GameNular(GameBool, "triRadioEnabled", TriRadioEnabled));
     GGameState.NewFunction(GameFunction(GameScalar, "triUnitAIDisabled", TriUnitAIDisabled, GameString));
     GGameState.NewFunction(GameFunction(GameString, "triAssertSubgroupLeader", TriAssertSubgroupLeader, GameString));
@@ -2963,6 +2999,7 @@ INIT_MODULE(GameStateExtTest, 3)
     GGameState.NewNularOp(GameNular(GameString, "triInGameplay", TriInGameplay));
     GGameState.NewFunction(GameFunction(GameString, "triAssertDisplay", TriAssertDisplay, GameScalar));
     GGameState.NewFunction(GameFunction(GameString, "triControlText", TriControlText, GameScalar));
+    GGameState.NewFunction(GameFunction(GameString, "triControlDisplayText", TriControlDisplayText, GameScalar));
     GGameState.NewFunction(GameFunction(GameString, "triAssertControlLeftOf", TriAssertControlLeftOf, GameArray));
     GGameState.NewNularOp(GameNular(GameString, "triVisibleTexts", TriVisibleTexts));
     GGameState.NewNularOp(GameNular(GameString, "triMpSetupMessage", TriMpSetupMessage));
@@ -3055,6 +3092,8 @@ INIT_MODULE(GameStateExtTest, 3)
     GGameState.NewNularOp(GameNular(GameString, "triPauseGame", TriPauseGame));
     GGameState.NewNularOp(GameNular(GameString, "triUnpauseGame", TriUnpauseGame));
     GGameState.NewNularOp(GameNular(GameString, "triOpenMap", TriOpenMap));
+    GGameState.NewNularOp(GameNular(GameScalar, "triMapGetScale", TriMapGetScale));
+    GGameState.NewFunction(GameFunction(GameString, "triBindAction", TriBindAction, GameArray));
     GGameState.NewFunction(GameFunction(GameString, "triShowMap", TriShowMap, GameScalar));
     GGameState.NewFunction(GameFunction(GameString, "triMapSetScale", TriMapSetScale, GameScalar));
     GGameState.NewFunction(GameFunction(GameString, "triShowVoiceOverlay", TriShowVoiceOverlay, GameScalar));
