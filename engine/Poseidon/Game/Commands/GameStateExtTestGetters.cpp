@@ -10,6 +10,7 @@ using namespace Poseidon;
 #include <Poseidon/UI/Controls/UIControls.hpp>
 #include <Poseidon/Dev/Debug/DebugOverlay.hpp>
 #include <Poseidon/Core/ModSystem.hpp>
+#include <Poseidon/Core/Config/UserConfig.hpp>
 #include <Poseidon/Core/resincl.hpp>
 #include <Poseidon/UI/DisplayUI.hpp>
 #include <Poseidon/Game/Chat.hpp>
@@ -19,6 +20,7 @@ using namespace Poseidon;
 #include <Poseidon/Input/ControllerUiScene.hpp>
 #include <Poseidon/Input/InputSubsystem.hpp>
 #include <Poseidon/World/World.hpp>
+#include <Poseidon/World/Entities/Weapons/Weapons.hpp>
 
 #include <cstdint>
 #include <string>
@@ -42,6 +44,14 @@ GameValue TriGetGLErrorCount(const GameState*);
 // ============================================================================
 // Window getters
 // ============================================================================
+
+GameValue TriGetDifficultyEnabled(const GameState* /*state*/, GameValuePar arg)
+{
+    const int type = toInt(static_cast<GameScalarType>(arg));
+    if (type < 0 || type >= DTN)
+        return GameValue(static_cast<float>(-1));
+    return GameValue(USER_CONFIG.IsEnabled(static_cast<DifficultyType>(type)) ? 1.0f : 0.0f);
+}
 
 GameValue TriGetResizable(const GameState* /*state*/)
 {
@@ -99,6 +109,25 @@ GameValue TriGetShadowMapCacheTest(const GameState* /*state*/)
     if (!GEngine)
         return GameValue("0");
     return GameValue(GEngine->ShadowMapCacheSelfTest() ? "1" : "0");
+}
+
+/// triGetHandItemClass -> class name of the weapon the hand proxies draw for
+/// the player, "" when the player carries nothing in the binocular slot.
+/// Resolves through the same lookup the proxies use, against live config.
+GameValue TriGetHandItemClass(const GameState* /*state*/)
+{
+    const EntityAI* player = GWorld ? GWorld->PlayerOn() : nullptr;
+    if (!player)
+    {
+        return GameValue("");
+    }
+    RefArray<WeaponType> weapons;
+    for (int i = 0; i < player->NWeaponSystems(); i++)
+    {
+        weapons.Add(const_cast<WeaponType*>(player->GetWeaponSystem(i)));
+    }
+    const WeaponType* item = Poseidon::FindBinocularWeapon(weapons);
+    return GameValue(item ? RString(item->GetName()) : RString(""));
 }
 
 GameValue TriGetProxyVertCount(const GameState* /*state*/)
@@ -504,6 +533,8 @@ void EnsureGameStateExtTestGettersLinked() {}
 
 INIT_MODULE(GameStateExtTestGetters, 3)
 {
+    GGameState.NewFunction(GameFunction(GameScalar, "triGetDifficultyEnabled", TriGetDifficultyEnabled, GameScalar));
+
     // Window
     GGameState.NewNularOp(GameNular(GameString, "triGetResizable", TriGetResizable));
     GGameState.NewNularOp(GameNular(GameScalar, "triGetBackBufferNonBlackCount", TriGetBackBufferNonBlackCount));
@@ -517,6 +548,7 @@ INIT_MODULE(GameStateExtTestGetters, 3)
     GGameState.NewNularOp(GameNular(GameScalar, "triGetShadowFrozenCasters", TriGetShadowFrozenCasters));
     GGameState.NewNularOp(GameNular(GameString, "triGetShadowMapCacheTest", TriGetShadowMapCacheTest));
     GGameState.NewNularOp(GameNular(GameScalar, "triGetProxyVertCount", TriGetProxyVertCount));
+    GGameState.NewNularOp(GameNular(GameString, "triGetHandItemClass", TriGetHandItemClass));
 
     // Audio
     GGameState.NewNularOp(GameNular(GameScalar, "triGetAudioCacheEntries", TriGetAudioCacheEntries));
