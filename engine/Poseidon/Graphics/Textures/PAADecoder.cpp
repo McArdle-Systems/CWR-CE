@@ -402,13 +402,7 @@ bool ReadPAAInfo(const std::string& path, PAAInfo& info)
 
 namespace
 {
-// Decode one already-Init()'d mip level's pixel data into RGBA8888.
-// Factored out of DecodePAABuffer so DecodePAABufferAllMips (which calls
-// this once per level) and the single-level case decode identically instead
-// of risking the two paths drifting apart. `mip` must already have `_w`/
-// `_h`/`_start` populated (i.e. Init() returned 0 for it already) -- this
-// function re-seeks to `_start` itself (SeekLevel) for the formats that read
-// their own raw header, exactly mirroring the original inline logic's order.
+// Decode an initialized mip level into RGBA8888.
 bool DecodeLevelPixels(QIStream& in, PacFormat format, PacLevelMem& mip, PacPalette& pal, bool isPaa, int width,
                        int height, std::vector<uint8_t>& outRgba)
 {
@@ -490,17 +484,7 @@ bool DecodeLevelPixels(QIStream& in, PacFormat format, PacLevelMem& mip, PacPale
     }
     else if (format == PacAI88)
     {
-        // AI88 is genuinely 8-bit alpha + 8-bit intensity. Routing it through
-        // the ARGB4444 destination format below (like real 4-bit ARGB4444
-        // textures) truncates both channels down to their top 4 bits before
-        // re-expanding via bit-replication -- harmless for actual ARGB4444
-        // source data (no precision to lose there), but it collapses AI88's
-        // 256-level gradients to 16 visibly banded steps. GL33 never hits
-        // this: it uploads AI88 straight to a native 8-bit GL_RG8 texture
-        // (TextureGL33_Init.cpp), so this CPU decode is Metal-only.
-        // PacLevelMem::LoadPaaBin16 already has a dedicated, full-precision
-        // AI88->ARGB8888 conversion (its PacARGB8888 destination-format
-        // branch) -- use that instead of the lossy 4444 shortcut.
+        // Preserve the source's 8-bit alpha and intensity channels.
         mip.SetDestFormat(PacARGB8888, 4);
         std::vector<uint8_t> mipData(mip.Size(), 0);
         mip.SeekLevel(in);
