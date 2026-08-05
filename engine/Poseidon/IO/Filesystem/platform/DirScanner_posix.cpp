@@ -47,18 +47,31 @@ static DIR* ci_opendir(const char* path)
         if (*p == '/')
             p++;
 
-        // Exact match first
+        // "resolved" may already end in '/' (root, "/"), so joining unconditionally
+        // with "%s/%s" would double it into "//component" — cosmetically ugly but
+        // not itself the on-device failure (see below).
+        const char* sep = (resolved[0] != '\0' && resolved[strlen(resolved) - 1] == '/') ? "" : "/";
+
+        // Exact match first — a stat(), not opendir(). iOS's app sandbox denies
+        // *listing* (opendir/readdir) almost any ancestor directory outside the
+        // app's own container (e.g. /private/var, or even /private/var/mobile),
+        // even though the app can freely traverse THROUGH those same ancestors by
+        // exact name. stat() only needs traverse/lookup rights, which the sandbox
+        // does grant, so walking correctly-cased ancestor segments (the entire
+        // path down to the mod's own folder) never needs the restricted listing
+        // fallback below — that only fires for the genuinely mismatched final
+        // segment, whose parent is inside the app's own writable container.
         char exact[MaxFileName];
-        snprintf(exact, sizeof(exact), "%s/%s", resolved, component);
-        DIR* tryDir = opendir(exact);
-        if (tryDir)
+        snprintf(exact, sizeof(exact), "%s%s%s", resolved, sep, component);
+        struct stat st;
+        if (stat(exact, &st) == 0 && S_ISDIR(st.st_mode))
         {
-            closedir(tryDir);
             snprintf(resolved, sizeof(resolved), "%s", exact);
             continue;
         }
 
-        // CI scan
+        // CI scan: only reached for a genuinely case-mismatched component, whose
+        // parent (by now) is always inside the app's own listable container.
         DIR* parent = opendir(resolved);
         if (!parent)
             return nullptr;
@@ -68,7 +81,7 @@ static DIR* ci_opendir(const char* path)
         {
             if (strcasecmp(entry->d_name, component) == 0)
             {
-                snprintf(exact, sizeof(exact), "%s/%s", resolved, entry->d_name);
+                snprintf(exact, sizeof(exact), "%s%s%s", resolved, sep, entry->d_name);
                 snprintf(resolved, sizeof(resolved), "%s", exact);
                 found = true;
                 break;
