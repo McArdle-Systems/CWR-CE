@@ -8,6 +8,7 @@
 #include <Poseidon/Audio/AudioFactory.hpp>
 #include <Poseidon/Foundation/Common/GamePaths.hpp>
 #include <Poseidon/Foundation/Common/PlatformPaths.hpp>
+#include <Poseidon/Foundation/Common/PlayerPrefs.hpp>
 #include <Poseidon/Foundation/Platform/InitBridge.hpp> // For wrapper functions
 #include <Poseidon/Network/NetworkConfig.hpp>
 #include <Poseidon/IO/Filesystem/FileOps.hpp>
@@ -1042,6 +1043,31 @@ void AppConfig::ParseCommandLine(int argc, char** argv)
     // game (the original `RES;<user>` ordering). Applies to client and dedicated
     // server alike (both original configs baked RES).
     RString effectiveMods = _modPaths;
+    if (effectiveMods.GetLength() == 0)
+    {
+        // No explicit --mod this launch (the common case off a CLI — iOS has none
+        // at all): fall back to whatever the MODS screen last had Applied. Drop any
+        // entry that no longer exists (mod folder removed, or a reinstall changed
+        // the sandbox container path) so a stale entry can't block startup.
+        const std::string persisted = Foundation::prefsGetString(AppName, "ActiveMods");
+        if (!persisted.empty())
+        {
+            std::string kept;
+            std::stringstream ss(persisted);
+            std::string entry;
+            while (std::getline(ss, entry, ';'))
+            {
+                std::error_code ec;
+                if (!entry.empty() && std::filesystem::is_directory(entry, ec))
+                {
+                    if (!kept.empty())
+                        kept += ';';
+                    kept += entry;
+                }
+            }
+            effectiveMods = RString(kept.c_str());
+        }
+    }
     {
         std::error_code rec;
         std::filesystem::path resCandidate =
