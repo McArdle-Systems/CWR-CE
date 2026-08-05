@@ -1272,6 +1272,17 @@ static std::string WorkshopModsRoot()
     return Foundation::GamePaths::Instance().WorkshopDir();
 }
 
+// Remember the ticked set across relaunches (there's no CLI --mod on iOS to persist
+// it for you). Stores the same ';'-joined absolute mount path RequestRemountWithMods
+// takes; AppConfig re-reads it at boot (when no CLI --mod was given) and drops any
+// entry that no longer exists on disk, so a mod removed since last launch doesn't
+// block startup. An empty modPath is persisted too, so explicitly clearing every
+// tick sticks as "no mods" instead of leaving stale data behind.
+static void PersistActiveMods(const RString& modPath)
+{
+    Foundation::prefsSetString(AppName, "ActiveMods", (const char*)modPath);
+}
+
 static std::string LowerStr(std::string s)
 {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1538,6 +1549,7 @@ void DisplayMods::OnButtonClicked(int idc)
         }
 
         RString modPath = list->BuildModPath(LocalModsRoot().c_str(), WorkshopModsRoot().c_str());
+        PersistActiveMods(modPath);
         GApp->RequestRemountWithMods((const char*)modPath);
         return;
     }
@@ -1671,6 +1683,7 @@ void DisplayMods::OnChildDestroyed(int idd, int exit)
         {
             RefreshInstalledStates(list, WorkshopModsRoot());
             RString modPath = list->BuildModPath(LocalModsRoot().c_str(), WorkshopModsRoot().c_str());
+            PersistActiveMods(modPath);
             GApp->RequestRemountWithMods((const char*)modPath);
         }
     }
