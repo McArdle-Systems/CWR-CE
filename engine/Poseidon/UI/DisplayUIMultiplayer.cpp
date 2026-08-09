@@ -2353,7 +2353,7 @@ bool DisplayServer::SetMission(bool editor)
         {
         OnEditor:
             RString userDir = GetUserMissionsBase();
-            SetBaseDirectory(userDir);
+            SetBaseDirectory(true, userDir);
             ::CreateDirectory(GetBaseDirectory() + RString(GameDirs::MPMissions), nullptr);
             ::SetMission(world, "", GetMPMissionsDir());
             return true;
@@ -2396,7 +2396,7 @@ bool DisplayServer::SetMission(bool editor)
         case 2:
         {
             RString userDir = GetUserMissionsBase();
-            SetBaseDirectory(userDir);
+            SetBaseDirectory(true, userDir);
             ::CreateDirectory(GetBaseDirectory() + RString(GameDirs::MPMissions), nullptr);
             if (!editor)
             {
