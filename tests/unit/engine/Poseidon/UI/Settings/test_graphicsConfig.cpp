@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <Poseidon/UI/Settings/GraphicsConfig.hpp>
+#include <Poseidon/UI/Settings/GraphicsApply.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -59,11 +60,11 @@ TEST_CASE("GraphicsConfig: Migrate lifts an untouched gamma once", "[Settings][G
     c.version = 0;
     c.gamma = 1.0f;
 
-    REQUIRE(c.Migrate());
+    REQUIRE(c.Migrate(60));
     CHECK(c.gamma == 1.2f);
     CHECK(c.version == GraphicsConfig::kVersion);
 
-    CHECK_FALSE(c.Migrate());
+    CHECK_FALSE(c.Migrate(60));
     CHECK(c.gamma == 1.2f);
 }
 
@@ -75,7 +76,7 @@ TEST_CASE("GraphicsConfig: Migrate keeps a gamma the user chose", "[Settings][Gr
         c.version = 0;
         c.gamma = chosen;
 
-        CHECK(c.Migrate());
+        CHECK(c.Migrate(60));
         CHECK(c.gamma == chosen);
         CHECK(c.version == GraphicsConfig::kVersion);
     }
@@ -87,8 +88,78 @@ TEST_CASE("GraphicsConfig: a versioned file is never migrated", "[Settings][Grap
     c.version = GraphicsConfig::kVersion;
     c.gamma = 1.0f;
 
-    CHECK_FALSE(c.Migrate());
+    CHECK_FALSE(c.Migrate(60));
     CHECK(c.gamma == 1.0f);
+}
+
+TEST_CASE("GraphicsConfig: a v1 gamma of 1.0 is the user's own", "[Settings][GraphicsConfig]")
+{
+    GraphicsConfig c;
+    c.version = 1;
+    c.gamma = 1.0f;
+
+    REQUIRE(c.Migrate(60));
+    CHECK(c.gamma == 1.0f);
+    CHECK(c.version == GraphicsConfig::kVersion);
+}
+
+TEST_CASE("GraphicsConfig: the FPS cap rounds up to an allowed rate", "[Settings][GraphicsConfig]")
+{
+    CHECK(GraphicsConfig::FpsCapForRefreshRate(30) == 30);
+    CHECK(GraphicsConfig::FpsCapForRefreshRate(60) == 60);
+    CHECK(GraphicsConfig::FpsCapForRefreshRate(144) == 144);
+
+    SECTION("a rate between two rows takes the higher one")
+    {
+        CHECK(GraphicsConfig::FpsCapForRefreshRate(75) == 90);
+        CHECK(GraphicsConfig::FpsCapForRefreshRate(165) == 240);
+        CHECK(GraphicsConfig::FpsCapForRefreshRate(50) == 60);
+    }
+
+    SECTION("an unreadable or very fast display still gets a bound")
+    {
+        CHECK(GraphicsConfig::FpsCapForRefreshRate(0) == 144);
+        CHECK(GraphicsConfig::FpsCapForRefreshRate(-1) == 144);
+        CHECK(GraphicsConfig::FpsCapForRefreshRate(360) == 240);
+    }
+}
+
+TEST_CASE("GraphicsConfig: Migrate bounds a cap that was left Unlimited", "[Settings][GraphicsConfig]")
+{
+    for (int version : {0, 1})
+    {
+        INFO("from version " << version);
+        GraphicsConfig c;
+        c.version = version;
+        c.fpsCap = 0;
+
+        REQUIRE(c.Migrate(144));
+        CHECK(c.fpsCap == 144);
+        CHECK(c.version == GraphicsConfig::kVersion);
+    }
+}
+
+TEST_CASE("GraphicsConfig: Migrate keeps an FPS cap the user chose", "[Settings][GraphicsConfig]")
+{
+    for (int chosen : {30, 60, 90, 120, 144, 240})
+    {
+        GraphicsConfig c;
+        c.version = 0;
+        c.fpsCap = chosen;
+
+        REQUIRE(c.Migrate(60));
+        CHECK(c.fpsCap == chosen);
+    }
+}
+
+TEST_CASE("GraphicsConfig: Unlimited survives once the file is current", "[Settings][GraphicsConfig]")
+{
+    GraphicsConfig c;
+    c.version = GraphicsConfig::kVersion;
+    c.fpsCap = 0;
+
+    CHECK_FALSE(c.Migrate(144));
+    CHECK(c.fpsCap == 0);
 }
 
 TEST_CASE("GraphicsConfig: a file without a version reloads as version 0", "[Settings][GraphicsConfig]")
@@ -129,6 +200,10 @@ TEST_CASE("GraphicsConfig: Save then Load round-trips every field", "[Settings][
     src.particlesQuality = GraphicsConfig::TierLow;
     src.vsync = GraphicsConfig::VsyncAdaptive;
     src.fpsCap = 144;
+    src.msaaSamples = 4;
+    src.renderScale = 1.5f;
+    src.alphaToCoverage = false;
+    src.multitexturing = false;
     src.brightness = 1.2f;
     src.gamma = 0.9f;
     REQUIRE(src.Save(path));
@@ -142,6 +217,10 @@ TEST_CASE("GraphicsConfig: Save then Load round-trips every field", "[Settings][
     CHECK(dst.particlesQuality == src.particlesQuality);
     CHECK(dst.vsync == src.vsync);
     CHECK(dst.fpsCap == src.fpsCap);
+    CHECK(dst.msaaSamples == src.msaaSamples);
+    CHECK(dst.renderScale == src.renderScale);
+    CHECK(dst.alphaToCoverage == src.alphaToCoverage);
+    CHECK(dst.multitexturing == src.multitexturing);
     CHECK(dst.brightness == src.brightness);
     CHECK(dst.gamma == src.gamma);
 }
@@ -220,6 +299,33 @@ TEST_CASE("GraphicsConfig: DerivePresetFromTiers returns Custom when tiers diver
     c.ApplyPresetToTiers(GraphicsConfig::PresetHigh);
     c.objectLod = GraphicsConfig::TierLow; // High preset has objectLod=High; mismatch
     CHECK(c.DerivePresetFromTiers() == GraphicsConfig::PresetCustom);
+}
+
+TEST_CASE("GraphicsConfig: the manual terrain tier stays outside every preset", "[Settings][GraphicsConfig]")
+{
+    constexpr auto manualTerrainTier = GraphicsConfig::TierExtreme;
+    FakeEnvironment env;
+    GraphicsConfig c;
+
+    c.terrainDetail = manualTerrainTier;
+    CHECK_FALSE(c.Normalize(env));
+    CHECK(c.terrainDetail == manualTerrainTier);
+    CHECK(c.DerivePresetFromTiers() == GraphicsConfig::PresetCustom);
+
+    for (int value = GraphicsConfig::PresetLow; value <= GraphicsConfig::PresetUltra; ++value)
+    {
+        c.ApplyPresetToTiers(static_cast<GraphicsConfig::Preset>(value));
+        CHECK(c.terrainDetail != manualTerrainTier);
+    }
+
+    c.objectLod = manualTerrainTier;
+    c.shadowQuality = manualTerrainTier;
+    c.particlesQuality = manualTerrainTier;
+    REQUIRE(c.Normalize(env));
+    CHECK(c.objectLod == GraphicsConfig::TierUltra);
+    CHECK(c.shadowQuality == GraphicsConfig::TierHigh);
+    CHECK(c.particlesQuality == GraphicsConfig::TierHigh);
+    CHECK(Poseidon::TerrainGridForTier(manualTerrainTier) == 3.125f);
 }
 
 TEST_CASE("GraphicsConfig: Normalize is a no-op when every field is valid", "[Settings][GraphicsConfig]")
