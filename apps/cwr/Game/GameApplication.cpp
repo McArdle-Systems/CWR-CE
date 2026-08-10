@@ -6,6 +6,7 @@
 #include <Poseidon/Foundation/Platform/FPUSetup.hpp>
 #include <Poseidon/Foundation/Platform/PoseidonInit.hpp>
 #include <Poseidon/Core/Config/Config.hpp>
+#include <Poseidon/Core/Config/UserConfig.hpp>
 #include <Poseidon/Foundation/Platform/AppConfig.hpp>
 #include <Poseidon/Foundation/Platform/GamePaths.hpp>
 #include <Poseidon/Foundation/Platform/StartupError.hpp>
@@ -64,7 +65,8 @@ using namespace Poseidon;
 namespace Poseidon
 {
 void CreateClient(RString, int, RString);
-}
+RString GetUserParams();
+} // namespace Poseidon
 
 namespace Poseidon
 {
@@ -258,6 +260,12 @@ void ApplyAspectPolicy(DisplayConfig& cfg)
 
     const int w = GEngine->Width();
     const int h = GEngine->Height();
+    UserConfig& userConfig = USER_CONFIG;
+    if (Poseidon::Presentation::ConfigureUserFov(userConfig, w, h))
+    {
+        const RString userPath = Poseidon::GetUserParams();
+        userConfig.SaveToFile(userPath);
+    }
     const AspectRatio::Settings settings = Poseidon::Presentation::Apply(w, h);
 
     // Diagnostic — full resolved policy so log inspection makes
@@ -368,24 +376,26 @@ std::string GraphicsConfigPath()
 void LoadAndApplyGraphicsConfig()
 {
     const std::string path = GraphicsConfigPath();
+    const int refreshHz = GEngine ? GEngine->RefreshRate() : 0;
     GraphicsConfig cfg;
     if (!cfg.Load(path))
     {
-        // First boot: pick a tier from system RAM and stamp the
-        // four tier rows from that preset's bundle.  Per-user
-        // knobs (vsync / fpsCap / brightness / gamma) keep their
-        // class-default values.
+        // First boot autodetects from hardware.  vsync / brightness / gamma
+        // keep their class-default values.
         cfg.LoadDefaults();
         const int ramMB = SDL_GetSystemRAM();
         cfg.qualityPreset = GraphicsConfig::PickPresetFromRam(ramMB);
         cfg.ApplyPresetToTiers(cfg.qualityPreset);
+        cfg.fpsCap = GraphicsConfig::FpsCapForRefreshRate(refreshHz);
         cfg.Save(path);
-        LOG_INFO(Graphics, "LoadGraphicsConfig: autodetected preset={} (RAM={} MB), wrote '{}'", (int)cfg.qualityPreset,
-                 ramMB, path);
+        LOG_INFO(Graphics,
+                 "LoadGraphicsConfig: autodetected preset={} (RAM={} MB) fpsCap={} (display {} Hz), wrote '{}'",
+                 (int)cfg.qualityPreset, ramMB, cfg.fpsCap, refreshHz, path);
     }
 
-    if (cfg.Migrate() && cfg.Save(path))
-        LOG_INFO(Graphics, "LoadGraphicsConfig: migrated '{}' to version {}", path, GraphicsConfig::kVersion);
+    if (cfg.Migrate(refreshHz) && cfg.Save(path))
+        LOG_INFO(Graphics, "LoadGraphicsConfig: migrated '{}' to version {} (fpsCap={}, display {} Hz)", path,
+                 GraphicsConfig::kVersion, cfg.fpsCap, refreshHz);
 
     LiveGraphicsEnv env;
     if (cfg.Normalize(env))
@@ -1774,6 +1784,7 @@ bool GameApplication::Remount(const char* newModPath)
     if (!CanRemount())
     {
         LOG_WARN(Core, "Re-mount refused: a mission is active");
+        Poseidon::DiscardStagedModInstalls(GApp->m_remountInstalls);
         return false;
     }
 
@@ -1805,6 +1816,23 @@ bool GameApplication::Remount(const char* newModPath)
         GEngine->ResetForRemount();
     }
 
+    std::string swapError;
+    if (!GApp->m_remountInstalls.empty() && !Poseidon::SwapStagedModInstalls(GApp->m_remountInstalls, &swapError))
+    {
+        LOG_ERROR(Core, "Re-mount install swap failed: {}", swapError);
+        Poseidon::ModSystem::SetModPath(prevModPath);
+        if (LoadGameData())
+        {
+            if (GWorld)
+                GWorld->StartIntro();
+            EnableRendering();
+        }
+        GApp->m_remountFailed = true;
+        Poseidon::DiscardStagedModInstalls(GApp->m_remountInstalls);
+        ProgressFinish();
+        return false;
+    }
+
     // Swap the active mod set, then reload everything from scratch.
     Poseidon::ModSystem::SetModPath(newModPath != nullptr ? newModPath : "");
 
@@ -1821,6 +1849,7 @@ bool GameApplication::Remount(const char* newModPath)
         {
             GEngine->ResetForRemount();
         }
+        Poseidon::RestoreStagedModInstalls(GApp->m_remountInstalls);
         Poseidon::ModSystem::SetModPath(prevModPath);
         if (LoadGameData())
         {
@@ -1835,6 +1864,7 @@ bool GameApplication::Remount(const char* newModPath)
             LOG_ERROR(Core, "Re-mount rollback also failed — rendering left disabled");
         }
         GApp->m_remountFailed = true; // the menu surfaces this once it is live again (AppIdle)
+        Poseidon::DiscardStagedModInstalls(GApp->m_remountInstalls);
         ProgressFinish();
         return false;
     }
@@ -1845,6 +1875,7 @@ bool GameApplication::Remount(const char* newModPath)
     }
 
     EnableRendering();
+    Poseidon::CommitStagedModInstalls(GApp->m_remountInstalls);
     ProgressFinish();
     LOG_INFO(Core, "Re-mount complete");
     return true;

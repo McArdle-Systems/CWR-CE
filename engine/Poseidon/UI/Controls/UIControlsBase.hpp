@@ -278,6 +278,7 @@ public:
 	IControl *GetCtrl(float x, float y) override;
 
 	bool SetSubControlPos(int idc, float x, float y, float w, float h);
+	bool GetSubControlPos(int idc, float &x, float &y, float &w, float &h) const;
 
 	int GetHoveredIdc() const;
 
@@ -321,6 +322,7 @@ public:
 protected:
 	void LoadControls(const ParamEntry &cls);
 	int FindControl(float x, float y);
+	void UpdateTextInputState();
 
 	void SetFocus(int i, bool def = false);
 	bool NextCtrl();
@@ -584,6 +586,8 @@ protected:
 
 	RString _filename;
 	float _indent;
+	// Parser-only subclasses provide page and text metrics without renderer services.
+	CHTMLContainer();
 public:
 
 	CHTMLContainer(const ParamEntry &cls);
