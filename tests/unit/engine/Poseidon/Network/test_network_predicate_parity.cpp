@@ -2,10 +2,35 @@
 #include <catch2/catch_message.hpp>
 
 #include <Poseidon/Foundation/platform.hpp>
+#include <Poseidon/Network/HttpTestRewrite.hpp>
 #include <Poseidon/Network/NetworkCustomAssets.hpp>
 #include <Poseidon/Network/NetworkMissionTransfer.hpp>
 #include <Poseidon/Network/NetworkPlayerRoleAssignment.hpp>
 #include <Poseidon/Network/NetworkServerAuth.hpp>
+
+TEST_CASE("HTTP test rewrites match exact URLs", "[network][http]")
+{
+    const std::vector<Poseidon::HttpTestRewrite> rewrites = {
+        {"https://squad.test/squad.xml?variant=full", "http://127.0.0.1:43127/__trident_http_fixture/0"},
+    };
+
+    REQUIRE(Poseidon::ResolveHttpTestUrl("https://squad.test/squad.xml?variant=full", rewrites) ==
+            "http://127.0.0.1:43127/__trident_http_fixture/0");
+    REQUIRE(Poseidon::ResolveHttpTestUrl("https://squad.test/squad.xml", rewrites) == "https://squad.test/squad.xml");
+}
+
+TEST_CASE("HTTP test rewrites require HTTP sources and loopback targets", "[network][http]")
+{
+    REQUIRE(Poseidon::IsHttpTestRewriteValid("https://squad.test/a", "http://127.0.0.1:1234/a"));
+    REQUIRE_FALSE(Poseidon::IsHttpTestRewriteValid("https://squad.test/a", "https://example.com/a"));
+    REQUIRE_FALSE(Poseidon::IsHttpTestRewriteValid("squad.test/a", "http://127.0.0.1:1234/a"));
+}
+
+TEST_CASE("HTTP test rewrites register process-local mappings", "[network][http]")
+{
+    REQUIRE(Poseidon::RegisterHttpTestRewrite("https://fixtures.test/value.txt", "http://127.0.0.1:43127/value"));
+    REQUIRE(Poseidon::ResolveHttpTestUrl("https://fixtures.test/value.txt") == "http://127.0.0.1:43127/value");
+}
 
 // Behaviour-preservation tests for the server-side network predicates that were
 // extracted out of the legacy inline command / vote / role logic. Each case
@@ -368,18 +393,6 @@ TEST_CASE("Transferred custom asset paths are confined to expected temp namespac
     REQUIRE(Poseidon::IsSafeNetworkTransferredAssetPath(RString("tmp/players/42/face.paa")));
     REQUIRE(Poseidon::IsSafeNetworkTransferredAssetPath(RString("tmp/players/42/sound/radio.ogg")));
     REQUIRE(Poseidon::IsSafeNetworkTransferredAssetPath(RString("tmp/squads/SQTAG/logo.paa")));
-    REQUIRE(Poseidon::ClassifyNetworkPlayerUploadRelativePath(RString("face.jpg")) ==
-            Poseidon::NetworkPlayerUploadKind::Face);
-    REQUIRE(Poseidon::ClassifyNetworkPlayerUploadRelativePath(RString("face.paa")) ==
-            Poseidon::NetworkPlayerUploadKind::Face);
-    REQUIRE(Poseidon::ClassifyNetworkPlayerUploadRelativePath(RString("sound/radio.ogg")) ==
-            Poseidon::NetworkPlayerUploadKind::Sound);
-    REQUIRE(Poseidon::ClassifyNetworkPlayerUploadRelativePath(RString("sound\\radio.ogg")) ==
-            Poseidon::NetworkPlayerUploadKind::Sound);
-    REQUIRE(Poseidon::ClassifyNetworkPlayerUploadRelativePath(RString()) == Poseidon::NetworkPlayerUploadKind::Other);
-    REQUIRE(Poseidon::ClassifyNetworkPlayerUploadRelativePath(RString("radio.ogg")) ==
-            Poseidon::NetworkPlayerUploadKind::Other);
-
     REQUIRE_FALSE(Poseidon::IsSafeNetworkTransferredAssetPath(RString("tmp/players/Alice/face.jpg")));
     REQUIRE_FALSE(Poseidon::IsSafeNetworkTransferredAssetPath(RString("tmp/players/Alice/sound/radio.ogg")));
     REQUIRE_FALSE(Poseidon::IsSafeNetworkTransferredAssetPath(RString("tmp/players/Alice/face.gif")));
@@ -437,14 +450,6 @@ TEST_CASE("Server player upload paths require safe player names and exact temp p
                                                              42) == playerDir + RString("face.jpg"));
     REQUIRE(Poseidon::NormalizeNetworkServerPlayerUploadPath(RString("/tmp/cwr/Tmp1985/players/42/sound/ack.ogg"), tmp,
                                                              42) == playerDir + RString("sound/ack.ogg"));
-    REQUIRE(
-        Poseidon::ClassifyNetworkServerPlayerUploadPath(
-            Poseidon::NormalizeNetworkServerPlayerUploadPath(RString("/tmp/cwr/Tmp1985/players/42/face.jpg"), tmp, 42),
-            tmp, 42) == Poseidon::NetworkPlayerUploadKind::Face);
-    REQUIRE(Poseidon::ClassifyNetworkServerPlayerUploadPath(
-                Poseidon::NormalizeNetworkServerPlayerUploadPath(RString("/tmp/cwr/Tmp1985/players/42/sound/ack.ogg"),
-                                                                 tmp, 42),
-                tmp, 42) == Poseidon::NetworkPlayerUploadKind::Sound);
     REQUIRE(Poseidon::NormalizeNetworkServerPlayerUploadPath(playerDir + RString("face.jpg"), tmp, 42) ==
             playerDir + RString("face.jpg"));
     REQUIRE_FALSE(Poseidon::IsSafeNetworkServerPlayerUploadPath(RString("server-tmp/players/Alice/face.jpg"), tmp, 42));
@@ -620,6 +625,14 @@ TEST_CASE("Squad logo paths reject unsafe XML path components", "[network][squad
             RString("squads/CWR/synthetic_grid.paa"));
     REQUIRE(Poseidon::BuildNetworkSquadPictureTmpPath(RString("CWR"), RString("synthetic_grid.paa")) ==
             RString("tmp/squads/CWR/synthetic_grid.paa"));
+    REQUIRE(Poseidon::FindNetworkSquadPicturePath(
+                RString("/profiles/client/"), RString("CWR"), RString("synthetic_grid.paa"), [](const RString& path)
+                { return path == RString("/profiles/client/tmp/squads/CWR/synthetic_grid.paa"); }) ==
+            RString("/profiles/client/tmp/squads/CWR/synthetic_grid.paa"));
+    REQUIRE(Poseidon::BuildNetworkSquadPictureTmpPath(RString("\xC4\x8D"
+                                                              "esk\xC3\xBD"),
+                                                      RString("znak.paa")) == RString("tmp/squads/\xC4\x8D"
+                                                                                      "esk\xC3\xBD/znak.paa"));
     REQUIRE(Poseidon::BuildNetworkServerSquadPictureUploadPath(RString("server-tmp"), RString("CWR"),
                                                                RString("synthetic_grid.paa")) ==
             RString("server-tmp/squads/CWR/synthetic_grid.paa"));

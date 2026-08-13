@@ -682,6 +682,22 @@ bool ControlObjectContainer::SetSubControlPos(int idc, float x, float y, float w
     return false;
 }
 
+bool ControlObjectContainer::GetSubControlPos(int idc, float& x, float& y, float& w, float& h) const
+{
+    for (int i = 0; i < _controls.Size(); ++i)
+    {
+        if (_controls[i]._control && _controls[i]._control->IDC() == idc)
+        {
+            x = _controls[i].x;
+            y = _controls[i].y;
+            w = _controls[i].w;
+            h = _controls[i].h;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ControlObjectContainer::FocusCtrlByIdc(int idc)
 {
     for (int i = 0; i < _controls.Size(); ++i)
@@ -754,7 +770,8 @@ bool ControlObjectContainer::WantsTextInput() const
     {
         return false;
     }
-    return _controls[_indexFocused]._control->WantsTextInput();
+    IControl* ctrl = _controls[_indexFocused]._control;
+    return ctrl && ctrl->WantsTextInput();
 }
 
 int ControlObjectContainer::GetFocusedIdc()
@@ -864,6 +881,7 @@ bool ControlObjectContainer::RemoveControl(int idc)
     {
         if (_controls[i]._control && _controls[i]._control->IDC() == idc)
         {
+            const bool removedFocused = _indexFocused == i;
             // Drop tracking indices that point at (or past) this slot
             // so input dispatch doesn't read a stale pointer or address
             // the wrong neighbour after the array shifts.
@@ -884,6 +902,8 @@ bool ControlObjectContainer::RemoveControl(int idc)
             else if (_indexMove > i)
                 _indexMove--;
             _controls.Delete(i);
+            if (removedFocused)
+                UpdateTextInputState();
             return true;
         }
     }
@@ -1169,6 +1189,18 @@ void ControlObjectContainer::SetFocus(int i, bool def)
         _controls[i]._control->OnSetFocus(true, def);
     }
     _indexFocused = i;
+    UpdateTextInputState();
+}
+
+void ControlObjectContainer::UpdateTextInputState()
+{
+    if (IsFocused() && GEngine)
+    {
+        if (WantsTextInput())
+            GEngine->StartTextInput();
+        else
+            GEngine->StopTextInput();
+    }
 }
 
 bool ControlObjectContainer::NextCtrl()
