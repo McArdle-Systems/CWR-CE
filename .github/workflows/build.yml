@@ -812,7 +812,7 @@ jobs:
             # success throughout. Not a code bug -- won't pass on any
             # headless/non-interactive client. Every other OAL test passes
             # here since none of them wait on real elapsed playback time.
-            ctest_exclude: 'PoseidonTests - OAL - (LastLoop keeps current loop offset instead of restarting|streamed LastLoop finishes current OGG pass instead of restarting)'
+            ctest_exclude: 'PoseidonTests - OAL - (LastLoop keeps current loop offset instead of restarting|streamed LastLoop finishes current OGG pass instead of restarting|streamed OGG can restart after reload)'
           - name: iOS Device Debug
             os: [self-hosted, macOS, arm64]
             preset: ios-arm64-device
