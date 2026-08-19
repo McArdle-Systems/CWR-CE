@@ -211,9 +211,12 @@ jobs:
     env:
       CWR_ARTIFACT_PREFIX: Windows-x64-rwdi
       # GitHub's hosted Windows runner exposes only Microsoft's OpenGL 1.1
-      # software implementation. Run the renderer-independent suite here;
-      # Linux and macOS retain real GL33/Metal coverage.
-      TRIDENT_RENDER: dummy
+      # software implementation, not enough for gl33. Mesa's llvmpipe
+      # (software rasterizer, no GPU needed) is installed below to get a
+      # real GL 3.3+ context, the same trick Linux CI uses via Xvfb+Mesa.
+      TRIDENT_RENDER: gl33
+      GALLIUM_DRIVER: llvmpipe
+      MESA_VERSION: 26.2.0
 
     steps:
       - name: Checkout
@@ -261,6 +264,18 @@ jobs:
           name: ${{ env.CWR_ARTIFACT_PREFIX }}-MasterService-${{ steps.build_metadata.outputs.sha_short }}
           path: exe
 
+      - name: Install Mesa software OpenGL (llvmpipe)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-msvc.7z"
+          Invoke-WebRequest -Uri $url -OutFile mesa.7z
+          # opengl32.dll next to the exe wins Windows' DLL search order over
+          # the system one; libgallium_wgl.dll is the actual driver it loads.
+          # No libglapi.dll needed -- Mesa dropped it as of 25.0.0.
+          7z e mesa.7z -oexe x64/opengl32.dll x64/libgallium_wgl.dll -y
+          Remove-Item mesa.7z
+
       - name: Write Trident env
         shell: pwsh
         run: |
@@ -284,7 +299,6 @@ jobs:
             --tag headless `
             --retries 2 `
             --skip-tag ci-host-blocked `
-            --skip-tag dummy-incompatible `
             --game-arg --audio `
             --game-arg "$env:TRIDENT_AUDIO" `
             --game-arg --no-strict `
