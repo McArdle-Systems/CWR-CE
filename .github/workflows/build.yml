@@ -812,21 +812,16 @@ jobs:
             build_dir: build/macos-arm64-clang-rwdi
             build_target: ''
             optional: true
-            # These two exercise real-time OpenAL playback (polling AL_SEC_OFFSET
-            # over wall-clock sleeps waiting for it to advance). Confirmed via
-            # ALSOFT_LOGLEVEL=4 + direct AL_SOURCE_STATE/AL_BUFFERS_QUEUED
-            # instrumentation on this runner: the device opens fine and the
-            # source reports AL_PLAYING with zero AL error, but the offset
-            # never advances even a single tick -- the CoreAudio render
-            # callback isn't firing at all. `pmset -g assertions` shows
-            # UserIsActive=0: this runner has no active interactive login
-            # session (kept awake by caffeinate only), and macOS silently
-            # withholds real-time audio I/O from non-interactive/background
-            # sessions even though the OpenAL/CoreAudio API layer reports
-            # success throughout. Not a code bug -- won't pass on any
-            # headless/non-interactive client. Every other OAL test passes
-            # here since none of them wait on real elapsed playback time.
-            ctest_exclude: 'PoseidonTests - OAL - (LastLoop keeps current loop offset instead of restarting|streamed LastLoop finishes current OGG pass instead of restarting|streamed OGG can restart after reload)'
+            # No ctest_exclude: real-time OpenAL playback tests (LastLoop,
+            # streamed LastLoop, streamed OGG restart) used to hang forever
+            # here -- AL_SEC_OFFSET never advanced even with AL_PLAYING and
+            # zero AL error, because this runner has no active interactive
+            # session (`pmset -g assertions` shows UserIsActive=0; kept awake
+            # by caffeinate only, and macOS withholds real-time audio I/O
+            # from non-interactive sessions). Fixed below by wrapping the
+            # Test step in `caffeinate -u`, which asserts UserIsActive
+            # directly -- confirmed against a standalone AL_SEC_OFFSET poll
+            # (stuck at 0 unwrapped, advances normally under caffeinate -u).
           - name: iOS Device Debug
             os: [self-hosted, macOS, arm64]
             preset: ios-arm64-device
@@ -1023,10 +1018,20 @@ jobs:
           CTEST_EXCLUDE: ${{ matrix.ctest_exclude }}
           ALSOFT_DRIVERS: ${{ runner.os == 'Linux' && 'null' || '' }}
         run: |
-          if [ -z "${CTEST_EXCLUDE}" ]; then
-            ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600
+          # `caffeinate -u` asserts UserIsActive for this process's lifetime --
+          # macOS withholds real-time CoreAudio render callbacks from a
+          # session without it, which otherwise hangs the OAL tests that wait
+          # on real elapsed playback time (see the matrix comment above).
+          # No-op on Linux (caffeinate doesn't exist there; unneeded anyway).
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            CAFFEINATE="caffeinate -u"
           else
-            ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600 -E "${CTEST_EXCLUDE}"
+            CAFFEINATE=""
+          fi
+          if [ -z "${CTEST_EXCLUDE}" ]; then
+            ${CAFFEINATE} ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600
+          else
+            ${CAFFEINATE} ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600 -E "${CTEST_EXCLUDE}"
           fi
 
       - name: Show compiler cache stats
