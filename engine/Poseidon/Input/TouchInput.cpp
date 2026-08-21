@@ -92,6 +92,15 @@ constexpr float kInputModeSwitchDebounce = 1.5f;
 constexpr float kMapPanMouseScaleX = 200.0f / 1.5f;
 constexpr float kMapPanMouseScaleY = 150.0f / 1.5f;
 constexpr float kMapPinchZoomScale = 5.0f;
+// A two-finger pinch/pan gesture's fingers rarely land in the exact same
+// frame - real hardware typically delivers them a few ms to a frame or two
+// apart. Without this grace window, the first finger alone would be seen as
+// a lone tap and ProcessMapPrimary would fire a real (if brief) LMB down,
+// which - on the tactical map, as a vehicle commander - dispatches a move
+// order before the second finger ever gets recognized. Held just long
+// enough for a genuine second finger to arrive; a real single-finger tap or
+// drag simply commits a beat later, which isn't perceptible.
+constexpr float kMapPrimaryDebounceSeconds = 0.06f;
 // #98 spike: pinch-to-zoom on the aiming/look side of the screen. Fraction
 // of the gesture's starting finger-distance the pinch must move before it
 // counts as "zoom in"/"zoom out" (see ProcessAimPinchGesture) - small
@@ -253,6 +262,12 @@ bool sAimZoomOutHeld = false;
 bool sMapGestureActive = false;
 bool sMapPrimaryActive = false;
 SDL_FingerID sMapPrimaryFingerId = 0;
+// See kMapPrimaryDebounceSeconds - tracks a lone finger that hasn't yet been
+// committed to primary-click/drag (LMB) semantics, in case a second finger
+// arrives and promotes it to a two-finger gesture instead.
+bool sMapPrimaryPending = false;
+SDL_FingerID sMapPrimaryPendingFingerId = 0;
+Foundation::UITime sMapPrimaryPendingSince;
 float sMapPanX = 0.0f;
 float sMapPanY = 0.0f;
 float sMapZoom = 0.0f;
@@ -1032,6 +1047,8 @@ void EndMapPrimary()
         SDLInput_BufferMouseButton(0, false);
     sMapPrimaryActive = false;
     sMapPrimaryFingerId = 0;
+    sMapPrimaryPending = false;
+    sMapPrimaryPendingFingerId = 0;
 }
 
 void ReleaseDirectTouchFinger(const Finger& finger)
@@ -1078,7 +1095,20 @@ void ProcessMapGesture()
     {
         EndMapGesture();
         if (count == 1 && a)
+        {
+            if (!sMapPrimaryActive)
+            {
+                if (!sMapPrimaryPending || sMapPrimaryPendingFingerId != a->id)
+                {
+                    sMapPrimaryPending = true;
+                    sMapPrimaryPendingFingerId = a->id;
+                    sMapPrimaryPendingSince = Glob.uiTime;
+                }
+                if (Glob.uiTime - sMapPrimaryPendingSince < kMapPrimaryDebounceSeconds)
+                    return;
+            }
             ProcessMapPrimary(*a);
+        }
         else
             EndMapPrimary();
         return;
