@@ -11,13 +11,6 @@
 
 #endif
 
-// Application name — default for all apps, can be overridden per-app before engine init.
-// Used as a filesystem path component (PlayerPrefs' config dir name), so it must not
-// contain characters reserved by any target filesystem (":" is illegal in NTFS paths
-// outside a drive letter, and silently breaks directory creation there); keep it aligned
-// with GamePaths' "CWR" codename instead.
-const char* AppName = "CWR";
-
 namespace Poseidon
 {
 Application* Application::s_instance = nullptr;

@@ -8,8 +8,8 @@
 #include <Poseidon/Audio/AudioFactory.hpp>
 #include <Poseidon/Foundation/Common/GamePaths.hpp>
 #include <Poseidon/Foundation/Common/PlatformPaths.hpp>
-#include <Poseidon/Foundation/Common/PlayerPrefs.hpp>
 #include <Poseidon/Foundation/Platform/InitBridge.hpp> // For wrapper functions
+#include <Poseidon/UI/Settings/GameSettingsConfig.hpp>
 #include <Poseidon/Network/NetworkConfig.hpp>
 #include <Poseidon/IO/Filesystem/FileOps.hpp>
 #include <filesystem>
@@ -699,7 +699,7 @@ void AppConfig::ParseCommandLine(int argc, char** argv)
 
         showOption(
             debugGroup
-                ->add_option("--duration", _simulateDuration, "Simulation duration in seconds (0 = until endGame)")
+                ->add_option("--duration", _simulateDuration, "Simulation duration in seconds (0 = until triEndGame)")
                 ->check(CLI::NonNegativeNumber),
             CliHelpVisibility::Dev);
 
@@ -1049,7 +1049,7 @@ void AppConfig::ParseCommandLine(int argc, char** argv)
         // at all): fall back to whatever the MODS screen last had Applied. Drop any
         // entry that no longer exists (mod folder removed, or a reinstall changed
         // the sandbox container path) so a stale entry can't block startup.
-        const std::string persisted = Foundation::prefsGetString(AppName, "ActiveMods");
+        const std::string persisted = LoadActiveMods();
         if (!persisted.empty())
         {
             std::string kept;

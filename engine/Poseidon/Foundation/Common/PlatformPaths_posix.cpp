@@ -1,5 +1,9 @@
 #include <Poseidon/Foundation/Common/PlatformPaths.hpp>
+#include <Poseidon/Foundation/Framework/Log.hpp>
 #include <cstdlib>
+#include <cerrno>
+#include <cstring>
+#include <filesystem>
 #include <sys/stat.h>
 #include <string>
 #include <unistd.h>
@@ -23,9 +27,33 @@ void ensureDirectory(const std::string& path)
             mkdir(partial.c_str(), 0755);
         }
     }
-    mkdir(path.c_str(), 0755);
+    if (mkdir(path.c_str(), 0755) != 0 && errno != EEXIST)
+    {
+        LOG_ERROR(Core, "Failed to create user directory '{}': {}", path, std::strerror(errno));
+    }
 }
 
+#ifdef __APPLE__
+std::string getHomeDir(const char* subpath, const char* appName)
+{
+    std::string base;
+    const char* home = getenv("HOME");
+    if (home && home[0] != '\0')
+    {
+        base = std::string(home) + "/" + subpath;
+    }
+    else
+    {
+        base = std::filesystem::temp_directory_path();
+    }
+    std::string dir = base + "/" + appName;
+    ensureDirectory(dir);
+    return dir;
+}
+#endif
+
+// Used on Linux everywhere, and on iOS (see the TARGET_OS_IPHONE block below) for
+// its test-only env-var override.
 std::string getXdgDir(const char* envVar, const char* defaultSuffix, const char* appName)
 {
     std::string base;
@@ -43,7 +71,7 @@ std::string getXdgDir(const char* envVar, const char* defaultSuffix, const char*
         }
         else
         {
-            base = std::string("/tmp");
+            base = std::filesystem::temp_directory_path();
         }
     }
     std::string dir = base + "/" + appName;
@@ -89,46 +117,62 @@ std::string getUserDocumentsDir(const char* appName)
 // POSEIDON_* vars in GamePaths.cpp instead.
 std::string getUserConfigDir(const char* appName)
 {
-    return getXdgDir("", "Library/Preferences", appName);
+    return getHomeDir("Library/Preferences", appName);
 }
 
 std::string getUserDataDir(const char* appName)
 {
-    return getXdgDir("", "Library/Application Support", appName);
+    return getHomeDir("Library/Application Support", appName);
 }
 
 std::string getUserCacheDir(const char* appName)
 {
-    return getXdgDir("", "Library/Caches", appName);
+    return getHomeDir("Library/Caches", appName);
 }
 
 std::string getUserDocumentsDir(const char* appName)
 {
-    return getXdgDir("", "Documents", appName);
+    return getHomeDir("Documents", appName);
 }
 #else
 std::string getUserConfigDir(const char* appName)
 {
+#ifdef __APPLE__
+    return getHomeDir("Library/Application Support", appName);
+#else
     return getXdgDir("XDG_CONFIG_HOME", ".config", appName);
+#endif
 }
 
 std::string getUserDataDir(const char* appName)
 {
+#ifdef __APPLE__
+    return getHomeDir("Library/Application Support", appName);
+#else
     // While the XDG data dir is the best match by name, we mostly use the
     // user data dir for configuration files, so use the XDG config dir.
     return getXdgDir("XDG_CONFIG_HOME", ".config", appName);
+#endif
 }
 
 std::string getUserCacheDir(const char* appName)
 {
+#ifdef __APPLE__
+    return getHomeDir("Library/Caches", appName);
+#else
     return getXdgDir("XDG_CACHE_HOME", ".cache", appName);
+#endif
 }
 
 std::string getUserDocumentsDir(const char* appName)
 {
+#ifdef __APPLE__
+    return getHomeDir("Documents", appName);
+#else
     // Linux has no per-game "Documents" convention; the XDG data dir is the
     // correct, non-roaming home for user content (mods, editor missions).
     return getXdgDir("XDG_DATA_HOME", ".local/share", appName);
+#endif
 }
 #endif
 

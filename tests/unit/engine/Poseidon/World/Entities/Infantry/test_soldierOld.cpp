@@ -6,6 +6,9 @@
 #include <Poseidon/World/Entities/Weapons/Weapons.hpp>
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 using namespace Poseidon;
 
@@ -60,15 +63,17 @@ TEST_CASE("WeaponType::IsBinocular centralizes canonical binocular detection", "
     REQUIRE_FALSE(binocularWithoutSlot.IsBinocular());
 }
 
-TEST_CASE("FindBinocularWeapon skips inherited binocular-slot equipment", "[Infantry][soldierOld][binocular]")
+TEST_CASE("FindBinocularWeapon prefers the Binocular over other slot items", "[Infantry][soldierOld][binocular]")
 {
     ParamFile pf = ParseConfig("class Binocular {};\n"
                                "class NVGoggles {};\n"
-                               "class Phone {};\n");
+                               "class Phone {};\n"
+                               "class M16 {};\n");
 
     Ref<WeaponType> nvg = MakeWeaponRef(pf >> "NVGoggles", MaskSlotBinocular);
     Ref<WeaponType> phone = MakeWeaponRef(pf >> "Phone", MaskSlotBinocular);
     Ref<WeaponType> binocular = MakeWeaponRef(pf >> "Binocular", MaskSlotBinocular);
+    Ref<WeaponType> rifle = MakeWeaponRef(pf >> "M16", MaskSlotPrimary);
 
     RefArray<WeaponType> weapons;
     weapons.Add(nvg);
@@ -77,15 +82,88 @@ TEST_CASE("FindBinocularWeapon skips inherited binocular-slot equipment", "[Infa
 
     REQUIRE(FindBinocularWeapon(weapons) == binocular);
 
-    RefArray<WeaponType> nonBinocularWeapons;
-    nonBinocularWeapons.Add(nvg);
-    nonBinocularWeapons.Add(phone);
+    RefArray<WeaponType> phoneOnly;
+    phoneOnly.Add(rifle);
+    phoneOnly.Add(phone);
 
-    REQUIRE(FindBinocularWeapon(nonBinocularWeapons) == nullptr);
+    REQUIRE(FindBinocularWeapon(phoneOnly) == phone);
+
+    RefArray<WeaponType> noSlotItems;
+    noSlotItems.Add(rifle);
+
+    REQUIRE(FindBinocularWeapon(noSlotItems) == nullptr);
 }
 
 TEST_CASE("stealth stance exposure tolerates soldiers without a group", "[Infantry][soldierOld]")
 {
     REQUIRE(Poseidon::SoldierStealthStanceExposure(nullptr, false, 0, 0) == 0.0f);
     REQUIRE(Poseidon::SoldierStealthStanceExposure(nullptr, true, 0, 0) == 0.0f);
+}
+
+TEST_CASE("Man flare lookup validates the selected weapon slot", "[Infantry][soldierOld]")
+{
+    const std::filesystem::path source =
+        std::filesystem::path(TESTS_ROOT_DIR).parent_path() / "engine/Poseidon/World/Entities/Infantry/SoldierOld.cpp";
+    std::ifstream input(source);
+    REQUIRE(input.is_open());
+
+    std::stringstream stream;
+    stream << input.rdbuf();
+    const std::string body = stream.str();
+    const std::size_t begin = body.find("bool Man::HasFlares");
+    REQUIRE(begin != std::string::npos);
+    const std::size_t end = body.find("Matrix4 Man::InsideCamera", begin);
+    REQUIRE(end != std::string::npos);
+
+    const std::string function = body.substr(begin, end - begin);
+    CHECK(function.find("_currentWeapon >= 0") != std::string::npos);
+    CHECK(function.find("_currentWeapon < NMagazineSlots()") != std::string::npos);
+    CHECK(function.find("if (slot._muzzle)") != std::string::npos);
+}
+
+TEST_CASE("MotionType rejects an out-of-range path destination", "[Infantry][soldierOld][motion]")
+{
+    ParamFile pf = ParseConfig("class EmptyActions {};\n"
+                               "class TestMoves {\n"
+                               "  class States {\n"
+                               "    class Idle {};\n"
+                               "    class Walk {};\n"
+                               "  };\n"
+                               "  class Interpolations {};\n"
+                               "  transitionsInterpolated[] = {};\n"
+                               "  transitionsSimple[] = {};\n"
+                               "  transitionsDisabled[] = {};\n"
+                               "  vehicleActions = EmptyActions;\n"
+                               "};\n");
+    MotionType motion;
+    motion.Load(pf >> "TestMoves");
+    MotionPath path;
+
+    REQUIRE_FALSE(motion.FindPath(path, motion.GetMoveId("Idle"), MotionPathItem(static_cast<MoveId>(32758))));
+    REQUIRE(path.Size() == 0);
+}
+
+TEST_CASE("MotionType ignores an out-of-range animation edge", "[Infantry][soldierOld][motion]")
+{
+    ParamFile pf = ParseConfig("class EmptyActions {};\n"
+                               "class TestMoves {\n"
+                               "  class States {\n"
+                               "    class Idle {};\n"
+                               "    class Walk {};\n"
+                               "  };\n"
+                               "  class Interpolations {};\n"
+                               "  transitionsInterpolated[] = {};\n"
+                               "  transitionsSimple[] = {};\n"
+                               "  transitionsDisabled[] = {};\n"
+                               "  vehicleActions = EmptyActions;\n"
+                               "};\n");
+    MotionType motion;
+    motion.Load(pf >> "TestMoves");
+    MoveId idle = motion.GetMoveId("Idle");
+    MoveId walk = motion.GetMoveId("Walk");
+    motion.AddEdge(idle, static_cast<MoveId>(32758), MEdgeSimple, 1.0f);
+    MotionPath path;
+
+    REQUIRE_FALSE(motion.FindPath(path, idle, MotionPathItem(walk)));
+    REQUIRE(path.Size() == 0);
 }

@@ -43,6 +43,7 @@
 #include <system_error>
 #include <vector>
 #include <Poseidon/Foundation/Containers/Array.hpp>
+#include <Poseidon/Foundation/Common/Win.h>
 #include <Poseidon/Foundation/Framework/Log.hpp>
 #include <Poseidon/Foundation/Math/Math3D.hpp>
 #include <Poseidon/Foundation/Math/Math3DP.hpp>
@@ -57,6 +58,7 @@ namespace Poseidon
 } // namespace Poseidon
 
 using namespace Poseidon::Dev;
+#include <Poseidon/Core/Game/GameLoop.hpp>
 #include <Poseidon/Dev/Debug/DebugCheats.hpp>
 #include <Poseidon/Dev/Debug/DebugCommands.hpp>
 #include <Poseidon/UI/Settings/AspectRatio.hpp>
@@ -64,7 +66,6 @@ using namespace Poseidon::Dev;
 #include <Poseidon/Core/Config/EngineConfig.hpp>
 #include <Poseidon/Core/Profile/ProfileManager.hpp>
 #include <Poseidon/Foundation/Common/GamePaths.hpp>
-#include <Poseidon/Foundation/Common/PlayerPrefs.hpp>
 #include <Poseidon/Foundation/Memory/CheckMem.hpp>
 #include <Poseidon/AI/AI.hpp>
 #include <Poseidon/AI/VehicleAI.hpp>
@@ -72,6 +73,7 @@ using namespace Poseidon::Dev;
 #include <Poseidon/World/Entities/Vehicles/Transport.hpp>
 #include <Poseidon/AI/EntityAI.hpp>
 #include <Poseidon/AI/AIUnit.hpp>
+#include <Poseidon/World/Entities/Infantry/SoldierOld.hpp>
 #include <Poseidon/Game/Commands/GameStateExtCommon.hpp>
 #include <Poseidon/Foundation/Strings/Mbcs.hpp>
 
@@ -106,6 +108,7 @@ bool TriNetworkAssetFileExists(const RString& relativePath)
 } // namespace
 
 GameValue TriVersion(const GameState*);
+GameValue TriEndGame(const GameState*);
 GameValue TriGameMode(const GameState*);
 GameValue TriDisplay(const GameState*);
 GameValue TriEditorMode(const GameState*);
@@ -118,8 +121,11 @@ GameValue TriSeedSessions(const GameState*, GameValuePar);
 GameValue TriSessionPing(const GameState*, GameValuePar);
 GameValue TriSeedMods(const GameState*, GameValuePar);
 GameValue TriSeedWorkshopMods(const GameState*, GameValuePar);
+GameValue TriFetchWorkshopMods(const GameState*);
+GameValue TriReadWorkshopFile(const GameState*, GameValuePar);
 GameValue TriSortMods(const GameState*, GameValuePar);
 GameValue TriModsVisibleCount(const GameState*);
+GameValue TriModsFreshness(const GameState*, GameValuePar);
 GameValue TriModsSetFilter(const GameState*, GameValuePar);
 GameValue TriModsRowClick(const GameState*, GameValuePar);
 GameValue TriOpenModDownload(const GameState*, GameValuePar);
@@ -138,7 +144,10 @@ GameValue TriDblClick(const GameState*, GameValuePar);
 GameValue TriSelectList(const GameState*, GameValuePar);
 GameValue TriSelectListByData(const GameState*, GameValuePar);
 GameValue TriListSel(const GameState*, GameValuePar);
+GameValue TriListSize(const GameState*, GameValuePar);
+GameValue TriListText(const GameState*, GameValuePar);
 GameValue TriAssertListSelAtLeast(const GameState*, GameValuePar);
+GameValue TriRemoveNestedControl(const GameState*, GameValuePar);
 GameValue TriSendKey(const GameState*, GameValuePar);
 GameValue TriSendKeyArr(const GameState*, GameValuePar);
 GameValue TriSendText(const GameState*, GameValuePar);
@@ -448,6 +457,12 @@ GameValue TriGetSwapInterval(const GameState* /*state*/)
     if (!GEngine)
         return GameValue((float)1);
     return GameValue((float)GEngine->GetSwapInterval());
+}
+
+/// triGetFpsCap -> int (the cap RenderFrame paces to, 0 when unlimited).
+GameValue TriGetFpsCap(const GameState* /*state*/)
+{
+    return GameValue((float)Poseidon::gUserFpsCap);
 }
 
 /// triGetObjectLodBias -> float (Scene's current LOD bias).
@@ -984,6 +999,33 @@ GameValue TriSetView(const GameState* /*state*/, GameValuePar arg)
     return GameValue("OK");
 }
 
+static GameValue TriSetPersonFaceView(Person* player, float distance)
+{
+    if (!player)
+        return GameValue("FAIL:no_player");
+
+    if (Man* man = dyn_cast<Man>(player))
+    {
+        if (stricmp(man->GetCurrentMove(), "EffectStandStill") != 0)
+            man->SwitchMove("EffectStandStill");
+        man->SetMimic("Default");
+    }
+
+    Vector3 forward = player->Direction();
+    if (forward.SquareSize() < 1e-6f)
+        forward = player->GetEyeDirection();
+    if (forward.SquareSize() < 1e-6f)
+        return GameValue("FAIL:no_player_direction");
+    forward = forward.Normalized();
+
+    Man* man = dyn_cast<Man>(player);
+    const Vector3 target = man ? man->CalculateCameraPosition(man->Transform()) : player->CameraPosition();
+    const Vector3 pos = target + forward * std::max(distance, 0.1f);
+    const Vector3 dir = (target - pos).Normalized();
+    World_SetTriViewOverride(pos, dir, VUp);
+    return GameValue("OK");
+}
+
 // triSetPlayerFaceView [distance, height] — pin the render camera in front of
 // the current real player. This follows the respawned body instead of relying
 // on a fixed map coordinate.
@@ -1010,6 +1052,52 @@ GameValue TriSetPlayerFaceView(const GameState* /*state*/, GameValuePar arg)
     const Vector3 dir = (target - pos).Normalized();
     World_SetTriViewOverride(pos, dir, VUp);
     return GameValue("OK");
+}
+
+// triSetRoleFaceView [role, distance] - pin the camera in front of the player
+// assigned to a multiplayer role.
+GameValue TriSetRoleFaceView(const GameState* /*state*/, GameValuePar arg)
+{
+    if (!GWorld)
+        return GameValue("FAIL:no_world");
+    const GameArrayType& a = arg;
+    if (a.Size() < 1)
+        return GameValue("FAIL:need_role");
+
+    const int roleIndex = static_cast<int>(static_cast<GameScalarType>(a[0]));
+    const PlayerRole* role = GetNetworkManager().GetPlayerRole(roleIndex);
+    if (!role || role->player == AI_PLAYER || role->player == NO_PLAYER)
+        return GameValue("FAIL:role_not_player");
+
+    for (int i = 0; i < GWorld->NVehicles(); ++i)
+    {
+        Person* person = dyn_cast<Person>(GWorld->GetVehicle(i));
+        if (person && person->GetRemotePlayer() == role->player)
+        {
+            const float distance = a.Size() >= 2 ? static_cast<float>(static_cast<GameScalarType>(a[1])) : 1.2f;
+            return TriSetPersonFaceView(person, distance);
+        }
+    }
+    return GameValue("FAIL:no_role_person");
+}
+
+GameValue TriRoleFaceTexture(const GameState* /*state*/, GameValuePar arg)
+{
+    if (!GWorld)
+        return GameValue("FAIL:no_world");
+
+    const int roleIndex = static_cast<int>(static_cast<GameScalarType>(arg));
+    const PlayerRole* role = GetNetworkManager().GetPlayerRole(roleIndex);
+    if (!role || role->player == AI_PLAYER || role->player == NO_PLAYER)
+        return GameValue("FAIL:role_not_player");
+
+    for (int i = 0; i < GWorld->NVehicles(); ++i)
+    {
+        Man* man = dyn_cast<Man>(GWorld->GetVehicle(i));
+        if (man && man->GetRemotePlayer() == role->player)
+            return GameValue(man->GetFaceTextureName());
+    }
+    return GameValue("FAIL:no_role_person");
 }
 
 // triClearView — release the override, returning to the player view.
@@ -1555,19 +1643,180 @@ GameValue TriPlayerFace(const GameState* /*state*/)
     return GameValue((const char*)player->GetInfo()._face);
 }
 
-/// triSetPlayerPref <name> — write the persisted last-used profile name (the
-/// PlayerName pref). A sequence phase uses this to leave a stale pref for the
-/// next boot. Returns "OK".
-GameValue TriSetPlayerPref(const GameState* /*state*/, GameValuePar arg)
+static RString PlayerSquadStatus(Person* player, GameValuePar arg)
+{
+    const GameArrayType& values = arg;
+    if (values.Size() != 2 || values[0].GetType() != GameString || values[1].GetType() != GameString)
+        return RString("FAIL:expected_title_picture");
+    if (!player)
+        return RString("FAIL:no_player");
+
+    const AIUnitInfo& info = player->GetInfo();
+    const RString expectedTitle = static_cast<GameStringType>(values[0]);
+    const RString expectedPicture = static_cast<GameStringType>(values[1]);
+    if (info._squadTitle != expectedTitle)
+        return RString("FAIL:title");
+    if (expectedPicture.GetLength() == 0)
+        return RString("OK");
+    if (!info._squadPicture)
+        return RString("FAIL:picture_missing");
+    const char* pictureName = info._squadPicture->GetName();
+    const char* slash = strrchr(pictureName, '/');
+    const char* backslash = strrchr(pictureName, '\\');
+    if (backslash && (!slash || backslash > slash))
+        slash = backslash;
+    if (RString(slash ? slash + 1 : pictureName) != expectedPicture)
+        return RString("FAIL:picture");
+    return RString("OK");
+}
+
+GameValue TriAssertPlayerSquad(const GameState* /*state*/, GameValuePar arg)
+{
+    return GameValue(PlayerSquadStatus(GWorld ? GWorld->GetRealPlayer() : nullptr, arg));
+}
+
+GameValue TriAssertRemotePlayerSquad(const GameState* /*state*/, GameValuePar arg)
+{
+    if (!GWorld)
+        return GameValue("FAIL:no_world");
+
+    Person* localPlayer = GWorld->GetRealPlayer();
+    auto statusFor = [localPlayer, &arg](Person* person) -> RString
+    {
+        if (!person || person == localPlayer)
+            return RString();
+        return PlayerSquadStatus(person, arg);
+    };
+    const int vehicleCount = GWorld->NVehicles();
+    for (int i = 0; i < vehicleCount; ++i)
+    {
+        Entity* vehicle = GWorld->GetVehicle(i);
+        Person* person = dyn_cast<Person>(vehicle);
+        if (!person)
+        {
+            Transport* transport = dyn_cast<Transport>(vehicle);
+            person = transport ? transport->Driver() : nullptr;
+        }
+        const RString status = statusFor(person);
+        if (status.GetLength() == 0)
+            continue;
+        if (status == RString("OK"))
+            return GameValue("OK");
+        char buffer[192];
+        snprintf(buffer, sizeof(buffer), "FAIL:remote=%d:name=%s:%s", person->GetRemotePlayer(),
+                 (const char*)person->GetInfo()._name, (const char*)status);
+        return GameValue(buffer);
+    }
+    return GameValue("FAIL:no_remote_player");
+}
+
+GameValue TriAssertRegionHasColor(const GameState* /*state*/, GameValuePar arg)
+{
+    if (!GEngine)
+        return GameValue("FAIL:no_engine");
+    if (arg.GetType() != GameArray)
+        return GameValue("FAIL:expected_array");
+    const GameArrayType& values = arg;
+    if (values.Size() != 8)
+        return GameValue("FAIL:expected_rect_rgb_tolerance");
+
+    const float u0 = static_cast<GameScalarType>(values[0]);
+    const float v0 = static_cast<GameScalarType>(values[1]);
+    const float u1 = static_cast<GameScalarType>(values[2]);
+    const float v1 = static_cast<GameScalarType>(values[3]);
+    const int expected[3] = {static_cast<int>(static_cast<GameScalarType>(values[4])),
+                             static_cast<int>(static_cast<GameScalarType>(values[5])),
+                             static_cast<int>(static_cast<GameScalarType>(values[6]))};
+    const int tolerance = static_cast<int>(static_cast<GameScalarType>(values[7]));
+    if (u0 < 0 || v0 < 0 || u1 > 1 || v1 > 1 || u0 > u1 || v0 > v1 || tolerance < 0)
+        return GameValue("FAIL:out_of_range");
+
+    const int x0 = static_cast<int>(u0 * (GEngine->Width() - 1));
+    const int y0 = static_cast<int>(v0 * (GEngine->Height() - 1));
+    const int x1 = static_cast<int>(u1 * (GEngine->Width() - 1));
+    const int y1 = static_cast<int>(v1 * (GEngine->Height() - 1));
+    constexpr int sampleStride = 16;
+    for (int y = y0; y <= y1; y += sampleStride)
+    {
+        for (int x = x0; x <= x1; x += sampleStride)
+        {
+            uint8_t rgb[3] = {};
+            if (!GEngine->SamplePixel(x, y, rgb))
+                return GameValue("FAIL:not_supported");
+            if (abs(static_cast<int>(rgb[0]) - expected[0]) <= tolerance &&
+                abs(static_cast<int>(rgb[1]) - expected[1]) <= tolerance &&
+                abs(static_cast<int>(rgb[2]) - expected[2]) <= tolerance)
+                return GameValue("OK");
+        }
+    }
+    return GameValue("FAIL:color_not_found");
+}
+
+GameValue TriCustomRadio(const GameState* /*state*/)
+{
+    if (!GWorld || !GWorld->UI())
+        return GameValue("");
+
+    const AutoArray<RString>& sounds = GWorld->UI()->GetCustomRadio();
+    RString result;
+    for (int i = 0; i < sounds.Size(); i++)
+    {
+        if (i > 0)
+            result = result + RString("|");
+        result = result + sounds[i];
+    }
+    return GameValue(result);
+}
+
+GameValue TriPlayCustomRadio(const GameState* /*state*/, GameValuePar arg)
+{
+    if (!GWorld || !GWorld->UI())
+        return GameValue("FAIL:no_ui");
+    const int index = static_cast<int>(static_cast<GameScalarType>(arg));
+    return GameValue(GWorld->UI()->PlayCustomRadio(index) ? "OK" : "FAIL:not_available");
+}
+
+GameValue TriSetActiveProfile(const GameState* /*state*/, GameValuePar arg)
 {
     std::string name = ((RString)(GameStringType)arg).Data();
-    Foundation::prefsSetString(AppName, "PlayerName", name.c_str());
+    SaveActiveProfile(name);
     return GameValue("OK");
+}
+
+GameValue TriMakeProfileReadOnly(const GameState* /*state*/, GameValuePar arg)
+{
+    const std::string name = ((RString)(GameStringType)arg).Data();
+    const std::filesystem::path dir = Poseidon::FilesystemPathFromUtf8(
+        Poseidon::ProfileManager::GetProfileDirPath(Poseidon::Foundation::GamePaths::Instance().UserDir(), name));
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec))
+        return GameValue("FAIL:profile_missing");
+
+    auto makeReadOnly = [](const std::filesystem::path& path)
+    {
+#ifdef _WIN32
+        const DWORD attributes = ::GetFileAttributesW(path.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+               ::SetFileAttributesW(path.c_str(), attributes | FILE_ATTRIBUTE_READONLY) != FALSE;
+#else
+        std::error_code permissionError;
+        std::filesystem::permissions(path,
+                                     std::filesystem::perms::owner_write | std::filesystem::perms::group_write |
+                                         std::filesystem::perms::others_write,
+                                     std::filesystem::perm_options::remove, permissionError);
+        return !permissionError;
+#endif
+    };
+
+    bool success = makeReadOnly(dir);
+    for (std::filesystem::recursive_directory_iterator entry(dir, ec), end; entry != end; entry.increment(ec))
+        success = makeReadOnly(entry->path()) && success;
+    return GameValue(success && !ec ? "OK" : "FAIL:permissions");
 }
 
 /// triAssertProfileMissing <name> -> "OK" if no profile directory exists for
 /// <name> under the user dir, else "FAIL:profile_exists". A later boot must not
-/// recreate a profile that a stale pref points at.
+/// recreate a profile that a stale active-profile setting points at.
 GameValue TriAssertProfileMissing(const GameState* /*state*/, GameValuePar arg)
 {
     std::string name = ((RString)(GameStringType)arg).Data();
@@ -2465,97 +2714,6 @@ GameValue TriAssertNetworkAssetExistsForPlayerName(const GameState* /*state*/, G
     return GameValue(buf);
 }
 
-GameValue TriNetworkAssetByteForPlayerName(const GameState* /*state*/, GameValuePar arg)
-{
-    if (arg.GetType() != GameArray)
-        return GameValue("FAIL:expected_array");
-    const GameArrayType& a = arg;
-    if (a.Size() < 4)
-        return GameValue("FAIL:need_kind_player_file_offset");
-    if (a[0].GetType() != GameString || a[1].GetType() != GameString || a[2].GetType() != GameString ||
-        a[3].GetType() != GameScalar)
-        return GameValue("FAIL:invalid_argument_type");
-
-    const GameStringType playerArg = static_cast<GameStringType>(a[1]);
-    const AutoArray<PlayerIdentity>* identities = GNetworkManager.GetIdentities();
-    const PlayerIdentity* found = nullptr;
-    if (identities)
-    {
-        for (int i = 0; i < identities->Size(); ++i)
-        {
-            if (stricmp((const char*)(*identities)[i].name, (const char*)playerArg) == 0)
-            {
-                found = &(*identities)[i];
-                break;
-            }
-        }
-    }
-    if (!found)
-        return GameValue("FAIL:no_identity");
-
-    char owner[32];
-    snprintf(owner, sizeof(owner), "%d", found->dpnid);
-    const GameStringType kindArg = static_cast<GameStringType>(a[0]);
-    const GameStringType fileArg = static_cast<GameStringType>(a[2]);
-    const RString relativePath = Poseidon::BuildNetworkTransferredAssetProbeTmpPath(
-        RString((const char*)kindArg), RString(owner), RString((const char*)fileArg));
-    if (relativePath.GetLength() == 0)
-        return GameValue("FAIL:invalid_asset_path");
-
-    const std::vector<char> bytes = Poseidon::ReadFileUtf8(Poseidon::GetUserDirectory() + relativePath);
-    const int offset = toInt(static_cast<float>(a[3]));
-    if (offset < 0 || offset >= static_cast<int>(bytes.size()))
-        return GameValue("FAIL:offset_out_of_range");
-
-    char result[64];
-    snprintf(result, sizeof(result), "%zu:%u", bytes.size(), static_cast<unsigned char>(bytes[offset]));
-    return GameValue(result);
-}
-
-GameValue TriReplaceAndUploadCustomSound(const GameState* /*state*/, GameValuePar arg)
-{
-    if (arg.GetType() != GameArray)
-        return GameValue("FAIL:expected_array");
-    const GameArrayType& a = arg;
-    if (a.Size() < 2 || a[0].GetType() != GameString || a[1].GetType() != GameString)
-        return GameValue("FAIL:need_source_and_sound_name");
-
-    const GameStringType sourceArg = static_cast<GameStringType>(a[0]);
-    const GameStringType soundArg = static_cast<GameStringType>(a[1]);
-    const RString sourceName((const char*)sourceArg);
-    const RString soundName((const char*)soundArg);
-    if (!Poseidon::IsSafeNetworkAssetPathComponent(sourceName) || !Poseidon::IsSafeNetworkAssetPathComponent(soundName))
-        return GameValue("FAIL:invalid_file_name");
-
-    NetworkClient* client = GNetworkManager.GetClient();
-    if (!client || client->GetPlayer() <= 0)
-        return GameValue("FAIL:no_network_client");
-
-    const RString userDirectory = Poseidon::GetUserDirectory();
-    const RString sourcePath = userDirectory + sourceName;
-    const RString soundPath = userDirectory + RString("Sound/") + soundName;
-    const std::vector<char> current = Poseidon::ReadFileUtf8(soundPath);
-    const std::vector<char> replacement = Poseidon::ReadFileUtf8(sourcePath);
-    if (current.empty() || replacement.empty())
-        return GameValue("FAIL:missing_or_empty_file");
-    if (current.size() != replacement.size())
-        return GameValue("FAIL:size_mismatch");
-    if (current == replacement)
-        return GameValue("FAIL:content_unchanged");
-    if (!Poseidon::WriteFileUtf8(soundPath, replacement.data(), replacement.size()))
-        return GameValue("FAIL:write_failed");
-
-    const RString destination =
-        Poseidon::BuildNetworkServerPlayerSoundUploadPath(GetServerTmpDir(), client->GetPlayer(), soundName);
-    if (destination.GetLength() == 0)
-        return GameValue("FAIL:invalid_upload_path");
-    client->TransferFileToServer(destination, soundPath);
-
-    char result[64];
-    snprintf(result, sizeof(result), "OK:%zu", replacement.size());
-    return GameValue(result);
-}
-
 GameValue TriAssertNetworkAssetExistsForAnyPeer(const GameState* /*state*/, GameValuePar arg)
 {
     if (arg.GetType() != GameArray)
@@ -2809,6 +2967,7 @@ INIT_MODULE(GameStateExtTest, 3)
     if (!appConfig.DevMode() && appConfig.GetHarnessPort() < 0 && appConfig.GetTestMissionPath().empty())
         return;
 
+    GGameState.NewNularOp(GameNular(GameNothing, "triEndGame", TriEndGame));
     GGameState.NewNularOp(GameNular(GameString, "triVersion", TriVersion));
     GGameState.NewNularOp(GameNular(GameScalar, "triGameMode", TriGameMode));
     GGameState.NewNularOp(GameNular(GameScalar, "triDisplay", TriDisplay));
@@ -2853,8 +3012,11 @@ INIT_MODULE(GameStateExtTest, 3)
     GGameState.NewFunction(GameFunction(GameScalar, "triSessionPing", TriSessionPing, GameScalar));
     GGameState.NewFunction(GameFunction(GameBool, "triSeedMods", TriSeedMods, GameScalar));
     GGameState.NewFunction(GameFunction(GameBool, "triSeedWorkshopMods", TriSeedWorkshopMods, GameScalar));
+    GGameState.NewNularOp(GameNular(GameBool, "triFetchWorkshopMods", TriFetchWorkshopMods));
+    GGameState.NewFunction(GameFunction(GameString, "triReadWorkshopFile", TriReadWorkshopFile, GameArray));
     GGameState.NewFunction(GameFunction(GameBool, "triSortMods", TriSortMods, GameScalar));
     GGameState.NewNularOp(GameNular(GameScalar, "triModsVisibleCount", TriModsVisibleCount));
+    GGameState.NewFunction(GameFunction(GameString, "triModsFreshness", TriModsFreshness, GameScalar));
     GGameState.NewFunction(GameFunction(GameBool, "triModsSetFilter", TriModsSetFilter, GameString));
     GGameState.NewFunction(GameFunction(GameBool, "triModsRowClick", TriModsRowClick, GameArray));
     GGameState.NewFunction(GameFunction(GameBool, "triOpenModDownload", TriOpenModDownload, GameScalar));
@@ -2874,6 +3036,9 @@ INIT_MODULE(GameStateExtTest, 3)
     GGameState.NewFunction(GameFunction(GameBool, "triSelectList", TriSelectList, GameArray));
     GGameState.NewFunction(GameFunction(GameBool, "triSelectListByData", TriSelectListByData, GameArray));
     GGameState.NewFunction(GameFunction(GameScalar, "triListSel", TriListSel, GameScalar));
+    GGameState.NewFunction(GameFunction(GameScalar, "triListSize", TriListSize, GameScalar));
+    GGameState.NewFunction(GameFunction(GameString, "triListText", TriListText, GameArray));
+    GGameState.NewFunction(GameFunction(GameBool, "triRemoveNestedControl", TriRemoveNestedControl, GameScalar));
     GGameState.NewFunction(GameFunction(GameBool, "triSendKey", TriSendKey, GameScalar));
     GGameState.NewFunction(GameFunction(GameBool, "triSendKey", TriSendKeyArr, GameArray));
     GGameState.NewFunction(GameFunction(GameString, "triEndMission", TriEndMission, GameString));
@@ -2890,6 +3055,8 @@ INIT_MODULE(GameStateExtTest, 3)
     GGameState.NewFunction(GameFunction(GameString, "triTeleportPlayerTo", TriTeleportPlayerTo, GameArray));
     GGameState.NewFunction(GameFunction(GameString, "triSetView", TriSetView, GameArray));
     GGameState.NewFunction(GameFunction(GameString, "triSetPlayerFaceView", TriSetPlayerFaceView, GameArray));
+    GGameState.NewFunction(GameFunction(GameString, "triSetRoleFaceView", TriSetRoleFaceView, GameArray));
+    GGameState.NewFunction(GameFunction(GameString, "triRoleFaceTexture", TriRoleFaceTexture, GameScalar));
     GGameState.NewNularOp(GameNular(GameString, "triClearView", TriClearView));
     GGameState.NewFunction(GameFunction(GameString, "triRdcCapture", TriRdcCapture, GameString));
     GGameState.NewNularOp(GameNular(GameScalar, "triPlayerPosX", TriPlayerPosX));
@@ -2936,7 +3103,14 @@ INIT_MODULE(GameStateExtTest, 3)
     GGameState.NewNularOp(GameNular(GameString, "triPlayerVehicle", TriPlayerVehicle));
     GGameState.NewNularOp(GameNular(GameString, "triPlayerName", TriPlayerName));
     GGameState.NewNularOp(GameNular(GameString, "triPlayerFace", TriPlayerFace));
-    GGameState.NewFunction(GameFunction(GameString, "triSetPlayerPref", TriSetPlayerPref, GameString));
+    GGameState.NewFunction(GameFunction(GameString, "triAssertPlayerSquad", TriAssertPlayerSquad, GameArray));
+    GGameState.NewFunction(
+        GameFunction(GameString, "triAssertRemotePlayerSquad", TriAssertRemotePlayerSquad, GameArray));
+    GGameState.NewFunction(GameFunction(GameString, "triAssertRegionHasColor", TriAssertRegionHasColor, GameArray));
+    GGameState.NewNularOp(GameNular(GameString, "triCustomRadio", TriCustomRadio));
+    GGameState.NewFunction(GameFunction(GameString, "triPlayCustomRadio", TriPlayCustomRadio, GameScalar));
+    GGameState.NewFunction(GameFunction(GameString, "triSetActiveProfile", TriSetActiveProfile, GameString));
+    GGameState.NewFunction(GameFunction(GameString, "triMakeProfileReadOnly", TriMakeProfileReadOnly, GameString));
     GGameState.NewFunction(GameFunction(GameString, "triAssertProfileMissing", TriAssertProfileMissing, GameString));
     GGameState.NewFunction(GameFunction(GameString, "triDamagePlayerVehicle", TriDamagePlayerVehicle, GameScalar));
     GGameState.NewNularOp(GameNular(GameScalar, "triPlayerVehicleDammage", TriPlayerVehicleDammage));
@@ -3057,6 +3231,7 @@ INIT_MODULE(GameStateExtTest, 3)
     GGameState.NewNularOp(GameNular(GameString, "triListMonitors", TriListMonitors));
     // Graphics screen probes
     GGameState.NewNularOp(GameNular(GameScalar, "triGetSwapInterval", TriGetSwapInterval));
+    GGameState.NewNularOp(GameNular(GameScalar, "triGetFpsCap", TriGetFpsCap));
     GGameState.NewNularOp(GameNular(GameScalar, "triGetObjectLodBias", TriGetObjectLodBias));
     GGameState.NewNularOp(GameNular(GameScalar, "triGetTerrainGrid", TriGetTerrainGrid));
     GGameState.NewNularOp(GameNular(GameScalar, "triGetViewDistance", TriGetViewDistance));
@@ -3126,10 +3301,6 @@ INIT_MODULE(GameStateExtTest, 3)
         GameFunction(GameString, "triAssertNetworkAssetExistsForRole", TriAssertNetworkAssetExistsForRole, GameArray));
     GGameState.NewFunction(GameFunction(GameString, "triAssertNetworkAssetExistsForPlayerName",
                                         TriAssertNetworkAssetExistsForPlayerName, GameArray));
-    GGameState.NewFunction(
-        GameFunction(GameString, "triNetworkAssetByteForPlayerName", TriNetworkAssetByteForPlayerName, GameArray));
-    GGameState.NewFunction(
-        GameFunction(GameString, "triReplaceAndUploadCustomSound", TriReplaceAndUploadCustomSound, GameArray));
     GGameState.NewFunction(GameFunction(GameString, "triAssertNetworkAssetExistsForAnyPeer",
                                         TriAssertNetworkAssetExistsForAnyPeer, GameArray));
     GGameState.NewFunction(GameFunction(GameString, "triAssertNetworkAssetExistsForAnyPeerBytes",
