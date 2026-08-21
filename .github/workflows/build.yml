@@ -1018,20 +1018,23 @@ jobs:
           CTEST_EXCLUDE: ${{ matrix.ctest_exclude }}
           ALSOFT_DRIVERS: ${{ runner.os == 'Linux' && 'null' || '' }}
         run: |
-          # `caffeinate -u` asserts UserIsActive for this process's lifetime --
           # macOS withholds real-time CoreAudio render callbacks from a
-          # session without it, which otherwise hangs the OAL tests that wait
-          # on real elapsed playback time (see the matrix comment above).
-          # No-op on Linux (caffeinate doesn't exist there; unneeded anyway).
+          # session without UserIsActive asserted, which otherwise hangs the
+          # OAL tests that wait on real elapsed playback time (see the matrix
+          # comment above). .github/scripts/caffeinate-user-active.sh keeps
+          # that asserted for exactly as long as ctest runs, however long
+          # that is -- see its header comment for why a plain `caffeinate -u`
+          # wrap isn't enough. No-op on Linux (caffeinate doesn't exist
+          # there; unneeded anyway).
           if [ "${{ runner.os }}" = "macOS" ]; then
-            CAFFEINATE="caffeinate -u"
+            RUNNER=".github/scripts/caffeinate-user-active.sh"
           else
-            CAFFEINATE=""
+            RUNNER=""
           fi
           if [ -z "${CTEST_EXCLUDE}" ]; then
-            ${CAFFEINATE} ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600
+            ${RUNNER} ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600
           else
-            ${CAFFEINATE} ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600 -E "${CTEST_EXCLUDE}"
+            ${RUNNER} ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600 -E "${CTEST_EXCLUDE}"
           fi
 
       - name: Show compiler cache stats
