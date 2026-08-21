@@ -203,11 +203,15 @@ jobs:
           if-no-files-found: error
 
   trident-test-windows:
-    name: Windows Trident
+    name: Windows Trident (shard ${{ matrix.shard }})
     runs-on: windows-2022
     needs:
       - build-windows
       - trident-windows
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       CWR_ARTIFACT_PREFIX: Windows-x64-rwdi
       # GitHub's hosted Windows runner exposes only Microsoft's OpenGL 1.1
@@ -297,6 +301,7 @@ jobs:
             --output-dir "$env:TRI_OUTPUT_DIR" `
             --render "$env:TRIDENT_RENDER" `
             --tag headless `
+            --shard ${{ matrix.shard }}/4 `
             --retries 2 `
             --skip-tag ci-host-blocked `
             --game-arg --audio `
@@ -308,7 +313,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: trident-output-windows-${{ steps.build_metadata.outputs.sha_short }}
+          name: trident-output-windows-${{ steps.build_metadata.outputs.sha_short }}-shard${{ matrix.shard }}
           path: trident-output
           if-no-files-found: ignore
 
@@ -431,11 +436,15 @@ jobs:
           if-no-files-found: error
 
   trident-test-macos:
-    name: macOS Trident
+    name: macOS Trident (shard ${{ matrix.shard }})
     runs-on: macos-latest
     needs:
       - build-macos
       - trident-macos
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       CWR_ARTIFACT_PREFIX: macOS-arm64-rwdi
       TRIDENT_RENDER: mtl
@@ -506,6 +515,7 @@ jobs:
           exe/tri test \
             --output-dir "$TRI_OUTPUT_DIR" \
             --render "$TRIDENT_RENDER" \
+            --shard ${{ matrix.shard }}/4 \
             --retries 2 \
             --skip-tag ci-host-blocked \
             --skip-tag metal-known-failure \
@@ -523,7 +533,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: trident-output-macos-${{ steps.build_metadata.outputs.sha_short }}
+          name: trident-output-macos-${{ steps.build_metadata.outputs.sha_short }}-shard${{ matrix.shard }}
           path: trident-output
           if-no-files-found: ignore
 
