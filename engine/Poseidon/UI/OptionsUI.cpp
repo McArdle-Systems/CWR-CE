@@ -206,20 +206,15 @@ RString GetBriefingFile()
 
 void CreatePath(RString path)
 {
-    // string will be changed temporarily
-    char* start = (char*)path.Data();
-    char* end = start;
-    while (*end)
+    std::string normalized = path.Data();
+    for (char& c : normalized)
     {
-        if (*end == '\\' || *end == '/')
-        {
-            char saved = *end;
-            *end = 0;
-            ::CreateDirectory(path, nullptr);
-            *end = saved;
-        }
-        end++;
+        if (c == '\\')
+            c = '/';
     }
+    const std::filesystem::path directory = FilesystemPathFromUtf8(normalized).parent_path();
+    if (!directory.empty())
+        CreateDirectoryUtf8(FilesystemPathToUtf8(directory).c_str());
 }
 
 static RString GetLegacyUserSaveDirectory()
