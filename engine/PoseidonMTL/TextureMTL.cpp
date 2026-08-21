@@ -46,6 +46,17 @@ AlphaStats::Kind ClassifyMetalAlpha(const AlphaStats& decoded)
 // DecodedImage's own RGBA8 layout. hasAlphaChannel/isChromaKey are chain-
 // level facts (same source for every level), matching DecodedImageChain's
 // PAA-path convention.
+//
+// PacARGB8888's byte order is a per-consumer convention, not a fixed one:
+// GL33 tags its upload GL_BGRA (TextureGL33_Init.cpp's InitGLPixelFormat)
+// and TextureSourceJPEG::GetMipmapData's PacARGB8888 case writes BGRA to
+// match. Metal's texture is declared PixelFormatRGBA8Unorm instead
+// (EngineMTLBootstrap::CreateTextureMipped) -- the same convention
+// DecodePAABufferAllMips' PAA path already writes (PAADecoder.cpp: r,g,b,a
+// in that order) -- so a loose image's BGRA output needs an R/B swap to
+// match, or every custom face/icon loaded this way renders red-blue-swapped
+// (confirmed via multiplayer/custom_face_visual: expected (55,70,205) --
+// mostly blue -- rendered as roughly (205,70,55) -- mostly red).
 bool ReadLooseImageChain(const RString& resolved, DecodedImageChain& chain)
 {
     ITextureSourceFactory* factory = SelectTextureSourceFactory(resolved);
@@ -77,6 +88,13 @@ bool ReadLooseImageChain(const RString& resolved, DecodedImageChain& chain)
         level.rgba.resize(static_cast<size_t>(mip.Size()));
         if (!src->GetMipmapData(level.rgba.data(), mip, i))
             break;
+
+        // BGRA -> RGBA: swap the R and B bytes of every pixel.
+        uint8_t* px = level.rgba.data();
+        const size_t pixelCount = level.rgba.size() / 4;
+        for (size_t p = 0; p < pixelCount; p++)
+            std::swap(px[p * 4 + 0], px[p * 4 + 2]);
+
         chain.levels.push_back(std::move(level));
     }
     return chain.valid();
