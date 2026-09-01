@@ -195,3 +195,20 @@ TEST_CASE("CapturePage colors action names without coloring separators", "[UI][C
     CHECK(mask.substr(status.find("Move back"), 9) == "111111111");
     CHECK(mask.back() == '0');
 }
+
+TEST_CASE("CapturePage color mask tolerates a missing translation", "[UI][CapturePage]")
+{
+    // A UserAction with no registered stringtable entry resolves to "" (see
+    // InputSubsystem::GetUserActionLabel). RefreshStatus's join skips empty
+    // labels rather than inserting a stray separator for them, so the walk
+    // here must match: skip, don't advance by "labelLength + 2" for it, or
+    // labelStart drifts past colorMask's length and replace() throws.
+    const std::string status = "Already assigned to multiple actions: Move forward, Move back.";
+    const std::string actions = "Move forward, Move back";
+    const std::string mask = TestCapturePage::ColorMask(status, actions, {"Move forward", "", "Move back"});
+
+    REQUIRE(mask.size() == status.size());
+    CHECK(mask.substr(status.find("Move forward"), 12) == "111111111111");
+    CHECK(mask.substr(status.find(", "), 2) == "00");
+    CHECK(mask.substr(status.find("Move back"), 9) == "111111111");
+}

@@ -339,6 +339,12 @@ std::string CapturePage::BuildStatusColorMask(const std::string& status, const s
     int labelStart = CountUtf8Codepoints(status.substr(0, actionByteStart).c_str());
     for (const std::string& actionLabel : actionLabels)
     {
+        // A missing translation resolves to "" -- it contributes no text and no
+        // separator on the join side (see RefreshStatus), so skip it here too.
+        // Without this, the walk drifts out of step with the joined string and
+        // can push labelStart past colorMask's length, which replace() throws on.
+        if (actionLabel.empty())
+            continue;
         const int labelLength = CountUtf8Codepoints(actionLabel.c_str());
         colorMask.replace(static_cast<size_t>(labelStart), static_cast<size_t>(labelLength),
                           static_cast<size_t>(labelLength), '1');
@@ -364,6 +370,8 @@ void CapturePage::RefreshStatus(OptionsShell& shell)
     {
         for (const std::string& actionLabel : actionLabels)
         {
+            if (actionLabel.empty())
+                continue; // missing translation -- keep separators in step with BuildStatusColorMask's walk
             if (!actions.empty())
                 actions += ", ";
             actions += actionLabel;
