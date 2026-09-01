@@ -145,6 +145,8 @@ set(POSEIDON_TEST_SOURCES
     Graphics/test_dds_converter.cpp
     Graphics/test_model_renderer.cpp
     Graphics/test_gl33_rendering.cpp
+    Graphics/test_gl33_bind_cache.cpp
+    Graphics/test_gl33_state_cache.cpp
     Graphics/test_fan_decompose.cpp
     Graphics/test_zbias_math.cpp
     Graphics/test_mipmap_layout.cpp
@@ -268,6 +270,7 @@ list(APPEND POSEIDON_TEST_SOURCES
 
     # World tests (batch-08)
     World/test_terrain.cpp
+    World/test_object_animated_bounds.cpp
     World/test_landscape_object_ids.cpp
     World/test_occlusion_contour.cpp
     World/test_occlusion_sphere_edge.cpp
@@ -398,6 +401,7 @@ list(APPEND POSEIDON_TEST_SOURCES
     Network/test_wire_format.cpp
     Network/test_transport_io.cpp
     Network/test_encoded_matrix3.cpp
+    Network/test_rot8b.cpp
     Network/test_chat_utf8_wire.cpp
     Network/Legacy/test_network_channel.cpp
     Network/Legacy/test_network_message.cpp
