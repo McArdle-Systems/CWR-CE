@@ -1,6 +1,7 @@
 #include <Poseidon/Core/Application.hpp>
 #include <PoseidonGL33/EngineGL33.hpp>
 #include <PoseidonGL33/GL33BindCache.hpp>
+#include <PoseidonGL33/GL33UploadSnapshot.hpp>
 #include <Poseidon/Core/Global.hpp>
 #include <Poseidon/World/Scene/Scene.hpp>
 #include <Poseidon/World/Scene/Camera/Camera.hpp>
@@ -779,17 +780,30 @@ static GLuint s_vsUBO = 0;
 static GLuint s_worldUBO = 0;
 static GLuint s_psUBO = 0;
 
+// Cached copy of s_worldUBO slot 0, used to dedupe matrix uploads
+static float s_worldSlot0[16] = {};
+static bool s_worldSlot0Valid = false;
+static Poseidon::GL33UploadSnapshot<sizeof(s_vsShadow)> s_vsUploadSnapshot;
+
 void EngineGL33::FlushVSConstants()
 {
     if (!s_vsUBO)
+    {
         return;
-    // glBindBufferBase is sticky — done once at UBO creation in
-    // InitVertexShaders.  Per-flush we only update buffer contents.
-    glBindBuffer(GL_UNIFORM_BUFFER, s_vsUBO);
+    }
+
+    if (s_vsUploadSnapshot.Matches(s_vsUBO, s_vsShadow))
+    {
+        return;
+    }
+
+    GL33Bind::UniformBuffer(s_vsUBO);
 #ifdef __APPLE__
     glBufferData(GL_UNIFORM_BUFFER, sizeof(s_vsShadow), nullptr, GL_STREAM_DRAW);
 #endif
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(s_vsShadow), s_vsShadow);
+
+    s_vsUploadSnapshot.Record(s_vsUBO, s_vsShadow);
 }
 
 void EngineGL33::FlushPSConstants()
@@ -807,7 +821,7 @@ void EngineGL33::FlushPSConstants()
     static GLuint s_psUploadedUBO = 0;
     if (s_psEverUploaded && s_psUploadedUBO == s_psUBO && memcmp(s_psUploaded, s_psShadow, sizeof(s_psShadow)) == 0)
         return;
-    glBindBuffer(GL_UNIFORM_BUFFER, s_psUBO);
+    GL33Bind::UniformBuffer(s_psUBO);
 #ifdef __APPLE__
     glBufferData(GL_UNIFORM_BUFFER, sizeof(s_psShadow), nullptr, GL_STREAM_DRAW);
 #endif
@@ -840,6 +854,7 @@ void EngineGL33::InitVertexShaders()
     glBindBuffer(GL_UNIFORM_BUFFER, s_vsUBO);
     glBufferData(GL_UNIFORM_BUFFER, sizeof(s_vsShadow), nullptr, GL_DYNAMIC_DRAW);
     glBindBufferBase(GL_UNIFORM_BUFFER, 0, s_vsUBO);
+    s_vsUploadSnapshot.Invalidate();
 
     // WorldInstances array UBO (binding 2) — 256 mat4 = 16 KB, the GL 3.3
     // minimum guaranteed UBO size. Slot 0 = the classic per-draw world
@@ -848,6 +863,7 @@ void EngineGL33::InitVertexShaders()
     glBindBuffer(GL_UNIFORM_BUFFER, s_worldUBO);
     glBufferData(GL_UNIFORM_BUFFER, 256 * 64, nullptr, GL_DYNAMIC_DRAW);
     glBindBufferBase(GL_UNIFORM_BUFFER, 2, s_worldUBO);
+    s_worldSlot0Valid = false;
 
     _vertexShaderSel = VSNone;
 }
@@ -1095,11 +1111,14 @@ void EngineGL33::UploadWorldInstances(const float* matrices, int count)
         return;
     if (count > 256)
         count = 256;
-    glBindBuffer(GL_UNIFORM_BUFFER, s_worldUBO);
+    GL33Bind::UniformBuffer(s_worldUBO);
 #ifdef __APPLE__
     glBufferData(GL_UNIFORM_BUFFER, 256 * 64, nullptr, GL_STREAM_DRAW);
 #endif
     glBufferSubData(GL_UNIFORM_BUFFER, 0, count * 64, matrices);
+    // Record slot 0 so the head's per-draw upload dedupes.
+    memcpy(s_worldSlot0, matrices, 64);
+    s_worldSlot0Valid = true;
 }
 
 void EngineGL33::UploadVSWorldMatrix(const float worldMatrix[16])
@@ -1109,7 +1128,14 @@ void EngineGL33::UploadVSWorldMatrix(const float worldMatrix[16])
     // the VSConstants world member stays as std140 padding.
     if (s_worldUBO)
     {
-        glBindBuffer(GL_UNIFORM_BUFFER, s_worldUBO);
+        // Skip if slot 0 already holds this matrix.
+        if (s_worldSlot0Valid && memcmp(s_worldSlot0, worldMatrix, 64) == 0)
+        {
+            return;
+        }
+        memcpy(s_worldSlot0, worldMatrix, 64);
+        s_worldSlot0Valid = true;
+        GL33Bind::UniformBuffer(s_worldUBO);
 #ifdef __APPLE__
         glBufferData(GL_UNIFORM_BUFFER, 256 * 64, nullptr, GL_STREAM_DRAW);
 #endif
@@ -1122,7 +1148,7 @@ void EngineGL33::UploadVSWorldMatrix(const float worldMatrix[16])
     // writers (materials, lights, cascade VPs) still flush the full block.
     if (!s_vsUBO)
         return;
-    glBindBuffer(GL_UNIFORM_BUFFER, s_vsUBO);
+    GL33Bind::UniformBuffer(s_vsUBO);
     glBufferSubData(GL_UNIFORM_BUFFER, VSConst::SlotWorld * 4 * sizeof(float), 64, s_vsShadow + VSConst::SlotWorld * 4);
 }
 
@@ -1297,11 +1323,6 @@ void EngineGL33::UploadPassConstants(const PassState& pass)
     ApplyBlendMode(static_cast<BlendMode>(pass.blendMode));
     ApplyDepthMode(static_cast<DepthMode>(pass.depthMode));
     SetShaderFogEnabled(pass.fogMode == FogMode::Enabled);
-}
-
-void EngineGL33::UploadObjectConstants(const DrawItem& item)
-{
-    UploadVSWorldMatrix(reinterpret_cast<const float*>(&item.worldMatrix));
 }
 
 // Compiled FS objects
