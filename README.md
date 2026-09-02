@@ -16,7 +16,7 @@ _based on https://github.com/bohemiainteractive/CWR_
 
 ---
 
-This community repository continues the official engine and game source code (codename *Poseidon*) behind *Arma: Cold War Assault* — the game first released in 2001 as *Operation Flashpoint: Cold War Crisis*. That release launched Bohemia Interactive and began the technology lineage that later grew into Real Virtuality, Arma, and Enfusion. The code has been modernized to C++20, built with CMake and Clang, with cross-platform support for Windows x64, Linux x64, Apple Silicon macOS, and iOS.
+This community repository continues the official engine and game source code (codename *Poseidon*) behind *Arma: Cold War Assault* — the game first released in 2001 as *Operation Flashpoint: Cold War Crisis*. That release launched Bohemia Interactive and began the technology lineage that later grew into Real Virtuality, Arma, and Enfusion. The code has been modernized to C++20, built with CMake and Clang, with cross-platform support for Windows x64, macOS arm64/x64, Linux arm64/x64, and iOS.
 Bohemia Interactive released it to the community that has kept this game alive for more than two decades — to study it, build on it, fix it, and create from it. Three things are worth keeping separate:
 
 **Source code (this repository)**
@@ -113,12 +113,13 @@ cmake --preset win-x64-clang-rwdi
 cmake --build build/win-x64-clang-rwdi
 ```
 
-On GNU/Linux, use the matching `linux-x64-clang-rwdi` preset.
+On GNU/Linux, use the matching `linux-x64-clang-rwdi` or `linux-arm64-clang-rwdi` preset.
 
 ### Testing
 
-Copy game binaries from `dist/` into the [Steam game's Remastered folder](https://store.steampowered.com/app/65790/Arma_Cold_War_Assault_Remastered/)
-or the [Steam demo folder](https://store.steampowered.com/app/4819000/Arma_Cold_War_Assault_Remastered_Demo/) and start.
+Copy game binaries from `dist/` into the [Steam](https://store.steampowered.com/app/65790/Arma_Cold_War_Assault_Remastered/)
+or [GOG](https://www.gog.com/en/game/arma_cold_war_assault) game's Remastered folder,
+or the [Steam demo folder](https://store.steampowered.com/app/4819000/Arma_Cold_War_Assault_Remastered_Demo/), and start.
 
 > [!WARNING]
 > Compiled binaries are not drop-in compatible with original game folder. See https://github.com/ofpisnotdead-com/CWR-CE/issues/8#issuecomment-4772323490 and https://github.com/ofpisnotdead-com/CWR-CE/issues/29#issuecomment-4803747960 for more info.
@@ -325,10 +326,11 @@ by Bohemia Interactive under the **Arma Public License Share Alike (APL-SA)**:
 ### Getting game data to run what you build
 
 The compiled binaries need game data to run. You can obtain the **free demo game
-data** or the paid full game on Steam:
+data** or the paid full game on Steam or GOG:
 
 - *Arma: Cold War Assault Remastered* demo on Steam: <https://store.steampowered.com/app/4819000>
 - *Arma: Cold War Assault Remastered* full game on Steam: <https://store.steampowered.com/app/65790>
+- *Arma: Cold War Assault Remastered* full game on GOG: <https://www.gog.com/en/game/arma_cold_war_assault>
 
 The full game data ships with the retail game. Whatever you do with assets is
 governed by the APL-SA linked above; whatever you do with this source is governed by

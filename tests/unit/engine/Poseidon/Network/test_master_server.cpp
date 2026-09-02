@@ -13,6 +13,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -20,6 +22,36 @@
 #include <Poseidon/Network/NetworkConfig.hpp>
 
 using namespace Poseidon;
+
+TEST_CASE("master service error text is bounded and single-line", "[network][master]")
+{
+    const std::string response = "bad\r\nrequest\t" + std::string(600, 'x');
+    const std::string sanitized = SanitizeMasterServerServiceError(response);
+
+    REQUIRE(sanitized.size() == 512);
+    REQUIRE(sanitized.starts_with("bad  request "));
+    REQUIRE(sanitized.find('\r') == std::string::npos);
+    REQUIRE(sanitized.find('\n') == std::string::npos);
+    REQUIRE(sanitized.find('\t') == std::string::npos);
+}
+
+TEST_CASE("master service token file is replaced atomically", "[network][master]")
+{
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "cwr-master-token-test.txt";
+    std::filesystem::remove(path);
+    std::filesystem::remove(path.string() + ".tmp");
+
+    REQUIRE(StoreMasterServerServiceTokenFile(path.string(), "first-token"));
+    REQUIRE(StoreMasterServerServiceTokenFile(path.string(), "second-token"));
+    std::ifstream input(path, std::ios::binary);
+    std::string stored;
+    std::getline(input, stored);
+    REQUIRE(stored == "second-token");
+    REQUIRE_FALSE(std::filesystem::exists(path.string() + ".tmp"));
+
+    input.close();
+    std::filesystem::remove(path);
+}
 
 TEST_CASE("master registration JSON serializes the version tag under 'vertag'", "[network][master][version]")
 {
@@ -128,12 +160,12 @@ TEST_CASE("a 3.02 browser lists a 3.03 server as incompatible", "[network][maste
 
 TEST_CASE("master service requests carry structured user-agent", "[network][master][version]")
 {
-    REQUIRE(BuildMasterServerServiceUserAgent(nullptr) == "CWR-CE/303");
+    REQUIRE(BuildMasterServerServiceUserAgent(nullptr) == "CWR-CE/305");
 
     MasterServerServiceHttpRequest request;
     REQUIRE(BuildMasterServerServiceGetRequest("https://master.example/v1/servers", request));
 
-    REQUIRE(request.userAgent.find("CWR-CE/303") == 0);
+    REQUIRE(request.userAgent.find("CWR-CE/305") == 0);
     REQUIRE(request.userAgent.find("tag=") != std::string::npos);
     REQUIRE(request.userAgent.find("role=client") != std::string::npos);
 }
@@ -147,29 +179,48 @@ TEST_CASE("master server attribution label includes the configured endpoint", "[
     REQUIRE(std::string(FormatNetworkMasterServerAttribution("")) == "Operated by disabled");
 }
 
-TEST_CASE("master mod list URL filters by current app and version", "[network][master][mods]")
+TEST_CASE("master mod list URL uses the workshop catalog app and current version", "[network][master][mods]")
 {
     const std::string url = BuildMasterServerServiceModListUrl("https://master.example", "effects");
 
     REQUIRE(url.find("/v1/mods?") != std::string::npos);
     REQUIRE(url.find("app=CWR-CE") != std::string::npos);
-    REQUIRE(url.find("actver=303") != std::string::npos);
+    REQUIRE(url.find("actver=305") != std::string::npos);
     REQUIRE(url.find("vertag=") != std::string::npos);
     REQUIRE(url.find("q=effects") != std::string::npos);
 }
 
 TEST_CASE("master mod catalog parse carries compatibility fields", "[network][master][mods]")
 {
-    const char* json = "{\"modId\":\"effects-pack\",\"app\":\"CWR-CE\",\"actver\":303,"
+    const char* json = "{\"modId\":\"effects-pack\",\"app\":\"CWR-CE\",\"actver\":305,"
                        "\"vertag\":\"dev\","
                        "\"compatible\":true,\"name\":\"Effects Pack\",\"version\":\"1.0\","
+                       "\"packageRevision\":4,\"sha256\":\"abcd\",\"publishedUnixMs\":1234,"
                        "\"description\":\"fx\",\"authors\":[\"simi\"],\"sizeBytes\":42}";
 
     MasterServerServiceModCatalogEntry entry;
     REQUIRE(ParseMasterServerServiceModDetailResponse(json, entry));
     REQUIRE(entry.modId == "effects-pack");
     REQUIRE(entry.app == "CWR-CE");
-    REQUIRE(entry.actualVersion == 303);
+    REQUIRE(entry.actualVersion == 305);
     REQUIRE(entry.versionTag == "dev");
     REQUIRE(entry.compatible);
+    REQUIRE(entry.packageRevision == 4);
+    REQUIRE(entry.sha256 == "abcd");
+    REQUIRE(entry.publishedUnixMs == 1234);
+
+    MasterServerServiceModCatalogEntry legacy;
+    REQUIRE(ParseMasterServerServiceModDetailResponse(R"({"modId":"legacy","name":"Legacy","version":"1.0"})", legacy));
+    REQUIRE(legacy.packageRevision == 1);
+}
+
+TEST_CASE("master registration JSON carries exact mod package revisions", "[network][master][mods]")
+{
+    MasterServerServiceRegistration registration;
+    registration.mod = "effects-pack";
+    registration.modPackages.push_back({"effects-pack", 4});
+
+    const std::string json = BuildMasterServerServiceRegistrationJson(registration);
+    REQUIRE(json.find("\"mod\":\"effects-pack\"") != std::string::npos);
+    REQUIRE(json.find("\"modPackages\":[{\"modId\":\"effects-pack\",\"packageRevision\":4}]") != std::string::npos);
 }

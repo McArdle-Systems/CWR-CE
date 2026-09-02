@@ -20,7 +20,7 @@ env:
   CCACHE_NOHASHDIR: true
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  DEMO_ASSETS_URL: https://files.ofpisnotdead.com/CWR-demo-assets.zip
+  DEMO_ASSETS_URL: https://files.ofpisnotdead.com/CWR-demo-assets-v2.zip
   CWR_ARTIFACT_PREFIX: Linux-x64-rwdi
   TRIDENT_RENDER: gl33
   TRIDENT_AUDIO: openal
@@ -30,20 +30,28 @@ env:
 
 jobs:
   build-linux:
-    name: Linux RelWithDebInfo
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            os: ubuntu-24.04-arm
+          - arch: x64
+            os: ubuntu-24.04
+    name: Linux ${{ matrix.arch }} RelWithDebInfo
+    runs-on: ${{ matrix.os }}
     env:
-      CWR_PRESET: linux-x64-clang-rwdi
-      CWR_VCPKG_TRIPLET: x64-linux-clang
-      CWR_BUILD_DIR: build/linux-x64-clang-rwdi
+      CWR_PRESET: linux-${{ matrix.arch }}-clang-rwdi
+      CWR_VCPKG_TRIPLET: ${{ matrix.arch }}-linux-clang
+      CWR_BUILD_DIR: build/linux-${{ matrix.arch }}-clang-rwdi
       # STRINGTABLE_MAP/EQUIPMENT/equipment.utf8.html cases need real
       # localization assets from packages/Remastered/, which is gitignored and
-      # not present on this hosted runner (see the [external-data] note on
-      # build-cwr-arm64's matrix below, which excludes the same tests for
-      # the same reason on its own hosted/non-real-data legs).
+      # not present on this hosted runner (see build-macos's CWR_CTEST_EXCLUDE
+      # below, which excludes tests for the same reason on its own
+      # hosted/non-real-data legs).
       CWR_CTEST_EXCLUDE: 'PoseidonTests - (OAL -|STRINGTABLE_MAP\.utf8\.csv ships both legend keys with English fallbacks|STRINGTABLE_EQUIPMENT\.utf8\.csv ships M16 keys for all 8 languages|equipment\.utf8\.html lives loose and references STR_EQ_M16 tokens|equipment\.utf8\.html line endings are clean CRLF \(no doubled CR\)|equipment\.utf8\.html preserves every EQ_ anchor and weapon image)'
-      CWR_DIST_DIR: dist/x64-linux-rwdi
-      CWR_ARTIFACT_PREFIX: Linux-x64-rwdi
+      CWR_DIST_DIR: dist/${{ matrix.arch }}-linux-rwdi
+      CWR_ARTIFACT_PREFIX: Linux-${{ matrix.arch }}-rwdi
 
     steps:
       - name: Checkout
@@ -82,6 +90,35 @@ jobs:
           name: ${{ env.CWR_ARTIFACT_PREFIX }}-Server-${{ steps.build_metadata.outputs.sha_short }}
           path: ${{ env.CWR_DIST_DIR }}/PoseidonServer
           if-no-files-found: error
+
+  build-linux-sanitizers:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: san
+            label: ASan+UBSan
+          - sanitizer: tsan
+            label: TSan
+    name: Linux ${{ matrix.label }}
+    runs-on: ubuntu-24.04
+    env:
+      CWR_PRESET: linux-x64-clang-${{ matrix.sanitizer }}
+      CWR_VCPKG_TRIPLET: x64-linux-clang-${{ matrix.sanitizer }}
+      CWR_BUILD_DIR: build/linux-x64-clang-${{ matrix.sanitizer }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        uses: ./.github/actions/build-cwr
+        with:
+          preset: ${{ env.CWR_PRESET }}
+          vcpkg-triplet: ${{ env.CWR_VCPKG_TRIPLET }}
+          build-dir: ${{ env.CWR_BUILD_DIR }}
+          run-tests: 'false'
+          ccache-max-size: '500M'
 
   build-windows:
     name: Windows RelWithDebInfo
@@ -203,17 +240,24 @@ jobs:
           if-no-files-found: error
 
   trident-test-windows:
-    name: Windows Trident
+    name: Windows Trident (shard ${{ matrix.shard }})
     runs-on: windows-2022
     needs:
       - build-windows
       - trident-windows
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       CWR_ARTIFACT_PREFIX: Windows-x64-rwdi
       # GitHub's hosted Windows runner exposes only Microsoft's OpenGL 1.1
-      # software implementation. Run the renderer-independent suite here;
-      # Linux and macOS retain real GL33/Metal coverage.
-      TRIDENT_RENDER: dummy
+      # software implementation, not enough for gl33. Mesa's llvmpipe
+      # (software rasterizer, no GPU needed) is installed below to get a
+      # real GL 3.3+ context, the same trick Linux CI uses via Xvfb+Mesa.
+      TRIDENT_RENDER: gl33
+      GALLIUM_DRIVER: llvmpipe
+      MESA_VERSION: 26.2.0
 
     steps:
       - name: Checkout
@@ -261,6 +305,18 @@ jobs:
           name: ${{ env.CWR_ARTIFACT_PREFIX }}-MasterService-${{ steps.build_metadata.outputs.sha_short }}
           path: exe
 
+      - name: Install Mesa software OpenGL (llvmpipe)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-msvc.7z"
+          Invoke-WebRequest -Uri $url -OutFile mesa.7z
+          # opengl32.dll next to the exe wins Windows' DLL search order over
+          # the system one; libgallium_wgl.dll is the actual driver it loads.
+          # No libglapi.dll needed -- Mesa dropped it as of 25.0.0.
+          7z e mesa.7z -oexe x64/opengl32.dll x64/libgallium_wgl.dll -y
+          Remove-Item mesa.7z
+
       - name: Write Trident env
         shell: pwsh
         run: |
@@ -282,9 +338,9 @@ jobs:
             --output-dir "$env:TRI_OUTPUT_DIR" `
             --render "$env:TRIDENT_RENDER" `
             --tag headless `
+            --shard ${{ matrix.shard }}/4 `
             --retries 2 `
             --skip-tag ci-host-blocked `
-            --skip-tag dummy-incompatible `
             --game-arg --audio `
             --game-arg "$env:TRIDENT_AUDIO" `
             --game-arg --no-strict `
@@ -294,7 +350,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: trident-output-windows-${{ steps.build_metadata.outputs.sha_short }}
+          name: trident-output-windows-${{ steps.build_metadata.outputs.sha_short }}-shard${{ matrix.shard }}
           path: trident-output
           if-no-files-found: ignore
 
@@ -417,11 +473,15 @@ jobs:
           if-no-files-found: error
 
   trident-test-macos:
-    name: macOS Trident
+    name: macOS Trident (shard ${{ matrix.shard }})
     runs-on: macos-latest
     needs:
       - build-macos
       - trident-macos
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       CWR_ARTIFACT_PREFIX: macOS-arm64-rwdi
       TRIDENT_RENDER: mtl
@@ -492,6 +552,7 @@ jobs:
           exe/tri test \
             --output-dir "$TRI_OUTPUT_DIR" \
             --render "$TRIDENT_RENDER" \
+            --shard ${{ matrix.shard }}/4 \
             --retries 2 \
             --skip-tag ci-host-blocked \
             --skip-tag metal-known-failure \
@@ -509,7 +570,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: trident-output-macos-${{ steps.build_metadata.outputs.sha_short }}
+          name: trident-output-macos-${{ steps.build_metadata.outputs.sha_short }}-shard${{ matrix.shard }}
           path: trident-output
           if-no-files-found: ignore
 
@@ -583,7 +644,7 @@ jobs:
         with:
           url: ${{ env.DEMO_ASSETS_URL }}
           path: packages/Demo
-          archive-name: CWR-demo-assets.zip
+          archive-name: CWR-demo-assets-v2.zip
 
       - name: Install Linux runtime packages
         run: |
@@ -798,21 +859,16 @@ jobs:
             build_dir: build/macos-arm64-clang-rwdi
             build_target: ''
             optional: true
-            # These two exercise real-time OpenAL playback (polling AL_SEC_OFFSET
-            # over wall-clock sleeps waiting for it to advance). Confirmed via
-            # ALSOFT_LOGLEVEL=4 + direct AL_SOURCE_STATE/AL_BUFFERS_QUEUED
-            # instrumentation on this runner: the device opens fine and the
-            # source reports AL_PLAYING with zero AL error, but the offset
-            # never advances even a single tick -- the CoreAudio render
-            # callback isn't firing at all. `pmset -g assertions` shows
-            # UserIsActive=0: this runner has no active interactive login
-            # session (kept awake by caffeinate only), and macOS silently
-            # withholds real-time audio I/O from non-interactive/background
-            # sessions even though the OpenAL/CoreAudio API layer reports
-            # success throughout. Not a code bug -- won't pass on any
-            # headless/non-interactive client. Every other OAL test passes
-            # here since none of them wait on real elapsed playback time.
-            ctest_exclude: 'PoseidonTests - OAL - (LastLoop keeps current loop offset instead of restarting|streamed LastLoop finishes current OGG pass instead of restarting)'
+            # No ctest_exclude: real-time OpenAL playback tests (LastLoop,
+            # streamed LastLoop, streamed OGG restart) used to hang forever
+            # here -- AL_SEC_OFFSET never advanced even with AL_PLAYING and
+            # zero AL error, because this runner has no active interactive
+            # session (`pmset -g assertions` shows UserIsActive=0; kept awake
+            # by caffeinate only, and macOS withholds real-time audio I/O
+            # from non-interactive sessions). Fixed below by wrapping the
+            # Test step in `caffeinate -u`, which asserts UserIsActive
+            # directly -- confirmed against a standalone AL_SEC_OFFSET poll
+            # (stuck at 0 unwrapped, advances normally under caffeinate -u).
           - name: iOS Device Debug
             os: [self-hosted, macOS, arm64]
             preset: ios-arm64-device
@@ -1009,10 +1065,23 @@ jobs:
           CTEST_EXCLUDE: ${{ matrix.ctest_exclude }}
           ALSOFT_DRIVERS: ${{ runner.os == 'Linux' && 'null' || '' }}
         run: |
-          if [ -z "${CTEST_EXCLUDE}" ]; then
-            ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600
+          # macOS withholds real-time CoreAudio render callbacks from a
+          # session without UserIsActive asserted, which otherwise hangs the
+          # OAL tests that wait on real elapsed playback time (see the matrix
+          # comment above). .github/scripts/caffeinate-user-active.sh keeps
+          # that asserted for exactly as long as ctest runs, however long
+          # that is -- see its header comment for why a plain `caffeinate -u`
+          # wrap isn't enough. No-op on Linux (caffeinate doesn't exist
+          # there; unneeded anyway).
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            RUNNER=".github/scripts/caffeinate-user-active.sh"
           else
-            ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600 -E "${CTEST_EXCLUDE}"
+            RUNNER=""
+          fi
+          if [ -z "${CTEST_EXCLUDE}" ]; then
+            ${RUNNER} ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600
+          else
+            ${RUNNER} ctest --test-dir '${{ matrix.build_dir }}' --output-on-failure --timeout 600 -E "${CTEST_EXCLUDE}"
           fi
 
       - name: Show compiler cache stats

@@ -5,11 +5,14 @@
 #include <Poseidon/IO/FileServer.hpp>
 #include <Poseidon/IO/Streams/QStream.hpp>
 #include <Poseidon/Graphics/Textures/PAADecoder.hpp>
+#include <Poseidon/Graphics/Textures/LooseTextures.hpp>
+#include <Poseidon/Graphics/Rendering/Font/Pactext.hpp>
 #include <Poseidon/Foundation/Logging/Logging.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace Poseidon
@@ -37,12 +40,85 @@ AlphaStats::Kind ClassifyMetalAlpha(const AlphaStats& decoded)
     return decoded.kind;
 }
 
-// Shared by LoadPixels and LoadPixelsInterpolated: read a PAA/PAC file
-// through the VFS and decode every mip level it stores.
+// A loose (non-PAA/PAC) sibling -- PNG/TGA/JPEG/BMP -- decoded via the same
+// ITextureSource machinery GL33 already uses (TextureGL33::DoLoadHeaders),
+// requesting PacARGB8888 output so each level lands directly in
+// DecodedImage's own RGBA8 layout. hasAlphaChannel/isChromaKey are chain-
+// level facts (same source for every level), matching DecodedImageChain's
+// PAA-path convention.
+//
+// PacARGB8888's byte order is a per-consumer convention, not a fixed one:
+// GL33 tags its upload GL_BGRA (TextureGL33_Init.cpp's InitGLPixelFormat)
+// and TextureSourceJPEG::GetMipmapData's PacARGB8888 case writes BGRA to
+// match. Metal's texture is declared PixelFormatRGBA8Unorm instead
+// (EngineMTLBootstrap::CreateTextureMipped) -- the same convention
+// DecodePAABufferAllMips' PAA path already writes (PAADecoder.cpp: r,g,b,a
+// in that order) -- so a loose image's BGRA output needs an R/B swap to
+// match, or every custom face/icon loaded this way renders red-blue-swapped
+// (confirmed via multiplayer/custom_face_visual: expected (55,70,205) --
+// mostly blue -- rendered as roughly (205,70,55) -- mostly red).
+bool ReadLooseImageChain(const RString& resolved, DecodedImageChain& chain)
+{
+    ITextureSourceFactory* factory = SelectTextureSourceFactory(resolved);
+    if (!factory || !factory->Check(resolved))
+        return false;
+
+    PacLevelMem mips[MAX_MIPMAPS];
+    std::unique_ptr<ITextureSource> src(factory->Create(resolved, mips, MAX_MIPMAPS));
+    if (!src)
+        return false;
+
+    chain.hasAlphaChannel = src->IsAlpha();
+    chain.isChromaKey = src->IsTransparent();
+    chain.oneBitAlpha = false; // loose images have no punch-through-only alpha format
+
+    const int nMips = src->GetMipmapCount();
+    chain.levels.clear();
+    chain.levels.reserve(static_cast<size_t>(nMips));
+    for (int i = 0; i < nMips; i++)
+    {
+        PacLevelMem& mip = mips[i];
+        mip.SetDestFormat(PacARGB8888, 4);
+
+        DecodedImage level;
+        level.width = mip._w;
+        level.height = mip._h;
+        level.hasAlphaChannel = chain.hasAlphaChannel;
+        level.isChromaKey = chain.isChromaKey;
+        level.rgba.resize(static_cast<size_t>(mip.Size()));
+        if (!src->GetMipmapData(level.rgba.data(), mip, i))
+            break;
+
+        // BGRA -> RGBA: swap the R and B bytes of every pixel.
+        uint8_t* px = level.rgba.data();
+        const size_t pixelCount = level.rgba.size() / 4;
+        for (size_t p = 0; p < pixelCount; p++)
+            std::swap(px[p * 4 + 0], px[p * 4 + 2]);
+
+        chain.levels.push_back(std::move(level));
+    }
+    return chain.valid();
+}
+
+// Shared by LoadPixels and LoadPixelsInterpolated: resolve `name` through the
+// loose-textures fallback (artist workflow: drop foo.png/foo.jpg next to
+// foo.paa and it's picked up live, no repack needed -- see
+// LooseTextures.hpp), then decode every mip level, either through the fast
+// direct-buffer PAA/PAC path or, for a resolved loose image, the shared
+// ITextureSource machinery above.
 bool ReadAndDecodeChain(RStringB name, DecodedImageChain& chain)
 {
+    const RString resolved = Poseidon::Graphics::ResolveLooseTexturePath(name);
+    const char* cresolved = resolved;
+    const size_t len = cresolved ? std::strlen(cresolved) : 0;
+    const bool isPaa = len >= 4 && (cresolved[len - 1] == 'a' || cresolved[len - 1] == 'A'); // .paa
+    const bool isPac = len >= 4 && (cresolved[len - 1] == 'c' || cresolved[len - 1] == 'C'); // .pac
+
+    if (!isPaa && !isPac)
+        return ReadLooseImageChain(resolved, chain);
+
     QIFStream in;
-    GFileServer->Open(in, name);
+    GFileServer->Open(in, resolved);
     if (in.fail())
     {
         LOG_WARN(Graphics, "MTL: texture not found: {}", static_cast<const char*>(name));
@@ -55,10 +131,6 @@ bool ReadAndDecodeChain(RStringB name, DecodedImageChain& chain)
 
     std::vector<char> fileData(static_cast<size_t>(size));
     in.read(fileData.data(), size);
-
-    const char* cname = name;
-    const size_t len = cname ? std::strlen(cname) : 0;
-    const bool isPaa = len >= 4 && (cname[len - 1] == 'a' || cname[len - 1] == 'A'); // .paa vs .pac
 
     chain = DecodePAABufferAllMips(fileData.data(), static_cast<size_t>(size), isPaa);
     return chain.valid();

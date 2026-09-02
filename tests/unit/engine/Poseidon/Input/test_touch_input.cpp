@@ -458,6 +458,14 @@ TEST_CASE("TouchInput: map scene one finger drives primary map interaction", "[i
     TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_MOTION, 1, 0.35f, 0.65f));
     TouchInput_ProcessFrame(1920, 1080);
 
+    // A lone finger doesn't commit to primary (LMB) semantics immediately -
+    // it waits out kMapPrimaryDebounceSeconds in case a second finger arrives
+    // and promotes this into a two-finger pan/pinch gesture instead.
+    CHECK_FALSE(TouchInput_GetDebugState().mapPrimaryActive);
+
+    Glob.uiTime += 0.1f;
+    TouchInput_ProcessFrame(1920, 1080);
+
     TouchInputDebugState state = TouchInput_GetDebugState();
     CHECK_FALSE(state.moveActive);
     CHECK_FALSE(state.lookActive);
@@ -501,6 +509,12 @@ TEST_CASE("TouchInput: editor map hides equipment button", "[input][touch]")
     TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, kEquipmentButtonX, kEquipmentButtonY));
     TouchInput_ProcessFrame(1920, 1080);
 
+    // See kMapPrimaryDebounceSeconds - a lone finger waits before committing
+    // to primary (LMB) semantics, in case a second finger promotes this to a
+    // two-finger gesture.
+    Glob.uiTime += 0.1f;
+    TouchInput_ProcessFrame(1920, 1080);
+
     TouchInputDebugState state = TouchInput_GetDebugState();
     CHECK_FALSE(state.buttons[(int)TouchButton::Equipment]);
     CHECK(state.mapPrimaryActive);
@@ -532,6 +546,30 @@ TEST_CASE("TouchInput: map scene two-finger gesture pans and pinches", "[input][
     TouchInput_ProcessFrame(1920, 1080);
     state = TouchInput_GetDebugState();
     CHECK_FALSE(state.mapGestureActive);
+}
+
+TEST_CASE("TouchInput: map scene second finger arriving a frame late doesn't fire a spurious primary click",
+          "[input][touch]")
+{
+    TouchFixture fixture;
+    TouchInput_TestSetMapSceneOverride(true, true);
+
+    // Real hardware rarely delivers both fingers of a pinch/pan gesture in
+    // the exact same frame - model that gap here. Without the debounce in
+    // ProcessMapGesture (see kMapPrimaryDebounceSeconds), this lone first
+    // frame would commit to primary (LMB) semantics, which on the tactical
+    // map reads as a move order for a vehicle commander - issue #88.
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, 0.30f, 0.40f));
+    TouchInput_ProcessFrame(1920, 1080);
+    CHECK_FALSE(TouchInput_GetDebugState().mapPrimaryActive);
+
+    Glob.uiTime += 0.02f; // well under kMapPrimaryDebounceSeconds
+    TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 2, 0.50f, 0.40f));
+    TouchInput_ProcessFrame(1920, 1080);
+
+    TouchInputDebugState state = TouchInput_GetDebugState();
+    CHECK(state.mapGestureActive);
+    CHECK_FALSE(state.mapPrimaryActive);
 }
 
 TEST_CASE("TouchInput: gameplay two-finger pinch on the aim side zooms and suppresses look rotation", "[input][touch]")
@@ -623,6 +661,12 @@ TEST_CASE("TouchInput: direct touch scene one finger drives primary touch", "[in
 
     TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_DOWN, 1, 0.50f, 0.50f));
     TouchInput_HandleFingerEvent(Finger(SDL_EVENT_FINGER_MOTION, 1, 0.52f, 0.52f));
+    TouchInput_ProcessFrame(1920, 1080);
+
+    // See kMapPrimaryDebounceSeconds - a lone finger waits before committing
+    // to primary (LMB) semantics, in case a second finger promotes this to a
+    // two-finger gesture.
+    Glob.uiTime += 0.1f;
     TouchInput_ProcessFrame(1920, 1080);
 
     TouchInputDebugState state = TouchInput_GetDebugState();
