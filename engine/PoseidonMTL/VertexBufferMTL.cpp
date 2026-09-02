@@ -78,7 +78,7 @@ bool VertexBufferMTL::Init(const Shape& src, VBType type)
     if (src.NVertex() <= 0)
         return false;
 
-    _dynamic = (type == VBDynamic || type == VBSmallDiscardable);
+    _dynamic = (type == VBDynamic);
     _vertexCount = src.NVertex();
     CopyVertices(src);
     if (_vbHandle == 0)
