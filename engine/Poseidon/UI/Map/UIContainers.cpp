@@ -2,6 +2,7 @@
 #include <Poseidon/UI/Controls/UIControls.hpp>
 #include <Poseidon/Input/ControllerUiLayout.hpp>
 #include <Poseidon/Input/InputSubsystem.hpp>
+#include <Poseidon/Input/TouchInput.hpp>
 #include <Poseidon/Graphics/Core/Engine.hpp>
 #include <Poseidon/World/World.hpp>
 #include <Poseidon/UI/Locale/Stringtable/Stringtable.hpp>
@@ -36,6 +37,18 @@ extern const float CameraZoom;
 extern const float InvCameraZoom;
 
 static const float tooltipDelay = 0.3f;
+
+// Double-click position-drift tolerance, in UI space (mouseX/Y run roughly
+// 0.2..0.8 - see the mouseX/mouseY computation above in this file). A real
+// mouse's hand jitter between the two clicks rarely exceeds a couple of
+// pixels, but a touch tap's cursor position only partially converges toward
+// the finger each frame (see BufferCursorToTouch in TouchInput.cpp), so two
+// taps at the same physical spot can register measurably further apart than
+// a mouse double-click. Widen the tolerance while touch is the active input
+// so double-taps on the map (marker creation, insert unit, ...) aren't
+// spuriously split into two single clicks.
+static const float kDblClkPosEpsilonMouse = 0.01f;
+static const float kDblClkPosEpsilonTouch = 0.05f;
 
 ControlsContainer::ControlsContainer(ControlsContainer* parent)
 {
@@ -877,7 +890,9 @@ void ControlsContainer::OnSimulate(EntityAI* vehicle)
 
         if (_dblClkTimeout > UITime(-10000) && !_indexLCaptured.IsNull())
         {
-            if (Glob.uiTime >= _dblClkTimeout || fabs(mouseX - _dblClkX) > 0.01 || fabs(mouseY - _dblClkY) > 0.01)
+            const float dblClkPosEpsilon = TouchInput_IsEnabled() ? kDblClkPosEpsilonTouch : kDblClkPosEpsilonMouse;
+            if (Glob.uiTime >= _dblClkTimeout || fabs(mouseX - _dblClkX) > dblClkPosEpsilon ||
+                fabs(mouseY - _dblClkY) > dblClkPosEpsilon)
             {
                 IControl* ctrl = Ctrl(_indexLCaptured);
                 if (ctrl->IsEnabled())
