@@ -567,9 +567,18 @@ mod tests {
         }
 
         #[cfg(not(target_os = "linux"))]
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .is_ok_and(|status| status.success())
+        {
+            // Use the standard absolute path because other parallel tests
+            // temporarily replace PATH while exercising binary discovery.
+            let output = std::process::Command::new("/bin/ps")
+                .args(["-p", &pid.to_string(), "-o", "stat="])
+                .output()
+                .expect("run ps");
+            let state = String::from_utf8_lossy(&output.stdout)
+                .trim_start()
+                .chars()
+                .next();
+            output.status.success() && state.is_some() && state != Some('Z')
+        }
     }
 }
