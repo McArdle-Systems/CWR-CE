@@ -378,9 +378,17 @@ static inline float4 applyDetailMode(float4 baseTex, float3 diffuseLit, float3 s
     return float4(diffuseLit + specLit, baseTex.a);
 }
 
-// Conventional binary-alpha boundary: samples above this are treated as the
-// solid body of a cutout (important for foliage), while lower filtered
-// coverage may be represented spatially (important for distant mesh fences).
+// Matches GL33's own default (no MSAA) cutout path exactly (EngineGL33_Shaders.cpp's
+// PSMesh: `if (r0.a - alphaRef.x * alphaRef.y < 0.0) discard`) -- a plain hard
+// threshold. GL33 only does anything smoother than this when alpha-to-coverage is
+// actually active (EngineGL33::GetAlphaToCoverage() requires real MSAA), which this
+// Metal pipeline has no equivalent of; there is no sample count or MSAA target
+// anywhere in EngineMTLBootstrap. This constant previously fed a screen-space Bayer
+// dither meant to approximate A2C's smooth density falloff for distant cutout mesh
+// (fences/foliage), but it doesn't correspond to either of GL33's two paths, and
+// dense, close-up cutout art (e.g. cockpit gauge faces, where ordinary
+// anti-aliased text/needle edges routinely dip under 50% coverage) turned that into
+// a visible stipple across the whole surface instead of a clean edge.
 constant float kSolidCutoutCoverage = 0.5;
 
 // Opaque-pipeline fragment shader (blending disabled at the pipeline level,
@@ -411,12 +419,7 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
         // to ~0.05 at dawn, discarding nearly all foliage fragments (GitHub #60).
         float coverage = texColor.a;
         if (coverage < kSolidCutoutCoverage)
-        {
-            float coverageThreshold = fract(52.9829189 * fract(dot(floor(in.position.xy),
-                                                                   float2(0.06711056, 0.00583715))));
-            if (coverage <= coverageThreshold)
-                discard_fragment();
-        }
+            discard_fragment();
     }
     float3 diffuseLit = texColor.rgb * in.color.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
