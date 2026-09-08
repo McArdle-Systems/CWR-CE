@@ -65,8 +65,7 @@ TEST_CASE("Metal cutouts preserve coverage without transparent depth writes", "[
     REQUIRE(bootstrap.find("constant float kSolidCutoutCoverage = 0.5;") != std::string::npos);
     REQUIRE(cutoutRegion.find("float coverage = texColor.a;") != std::string::npos);
     REQUIRE(cutoutRegion.find("if (coverage < kSolidCutoutCoverage)") != std::string::npos);
-    REQUIRE(cutoutRegion.find("float coverageThreshold = fract(") != std::string::npos);
-    REQUIRE(cutoutRegion.find("if (coverage <= coverageThreshold)") != std::string::npos);
+    REQUIRE(cutoutRegion.find("discard_fragment();") != std::string::npos);
     REQUIRE(bootstrap.find("const bool measuredWorldCutout = state.alphaRef == 254 && state.useDepth;") !=
             std::string::npos);
     REQUIRE(bootstrap.find("measuredWorldCutout ? MTL::CullModeBack : MTL::CullModeNone") != std::string::npos);
