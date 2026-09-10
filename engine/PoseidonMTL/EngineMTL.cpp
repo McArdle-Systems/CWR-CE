@@ -1194,6 +1194,31 @@ AbstractTextBank* EngineMTL::TextBank()
     return _textBank;
 }
 
+void EngineMTL::ResetForRemount()
+{
+    if (_textBank)
+    {
+        // Drop the detail/specular/grass/water-bump set so the reloaded
+        // CfgDetailTextures rebuilds it, instead of carrying the previous mod's
+        // set over (the bank derives it once and keeps it until the bank dies,
+        // which an in-process remount never does).
+        _textBank->ReleaseDetailTextures();
+
+        // TODO: Metal does not yet drop the *general* texture set here, so a
+        // remount still reuses previously-loaded textures under their old names.
+        // GL33 calls ReleaseAllTextures() at this point; TextBankMTL's version is
+        // not safe to call while anything still holds a strong Ref, because it
+        // also clears _bigSurfaceLRU and the bootstrap's GPU surface pool out
+        // from under still-live TextureMTL objects (see its doc comment: it
+        // assumes a bulk destroy where nothing survives). Textures that outlive a
+        // remount are real -- the globally cached animated water textures are
+        // reached again from Landscape::DrawWater on the very next frame -- and
+        // calling it here is an immediate use-after-free crash. Making it safe
+        // needs live textures to drop and lazily re-upload their GPU surfaces,
+        // which is its own piece of work.
+    }
+}
+
 bool EngineMTL::IsResizable() const
 {
     return _sdlWindow && (SDL_GetWindowFlags(_sdlWindow) & SDL_WINDOW_RESIZABLE) != 0;

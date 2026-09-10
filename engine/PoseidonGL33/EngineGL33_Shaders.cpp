@@ -1,6 +1,7 @@
 #include <Poseidon/Core/Application.hpp>
 #include <PoseidonGL33/EngineGL33.hpp>
 #include <PoseidonGL33/GL33BindCache.hpp>
+#include <PoseidonGL33/GL33LightIndices.hpp>
 #include <PoseidonGL33/GL33UploadSnapshot.hpp>
 #include <Poseidon/Core/Global.hpp>
 #include <Poseidon/World/Scene/Scene.hpp>
@@ -87,17 +88,16 @@ layout(std140) uniform VSConstants {
     vec4 specEn;        // c19: {enabled, 0, 0, 0}
     vec4 sunEn;         // c20: {enabled, 0, 0, 0}
     vec4 vpScale;       // c21: {2/width, 2/height, 0, 0} — VSScreen only, declared here for layout parity
-    vec4 _pad22;
-    vec4 _pad23;
+    vec4 hmParams0;     // c22: terrain heightmap {invGrid, camX, camZ, camY}
+    vec4 hmParams1;     // c23: land clip {boundingCenter.xyz, mode}
     mat4 texMat0;       // c24-c27
     mat4 texMat1;       // c28-c31
     vec4 texCtrl;       // c32: {genTex0, genTex1, 0, 0}
-    vec4 lightCount;        // c33: x = active local light count
-    vec4 lightPos[8];       // c34-c41: xyz world pos, w = startAtten
-    vec4 lightDiffuse[8];   // c42-c49: diffuse * nightEffect
-    vec4 lightAmbient[8];   // c50-c57: ambient * nightEffect
-    vec4 localLightDir[8];  // c58-c65: xyz beam dir (world), w = isSpot
-    mat4 lightVP;           // c66-c69: shadow-map light view-projection (sampled per fragment)
+    vec4 matDiffuseRaw; // c33: raw material diffuse, for local lights
+    vec4 matAmbientRaw; // c34: raw material ambient, for local lights
+    vec4 _padLights[31];// c35-c65: reserved
+    mat4 lightVP;       // c66-c69: shadow-map light view-projection (sampled per fragment)
+    vec4 landGrid;      // c70: {invLandGrid, heightmap texels per land square, 0, 0}
 };
 
 // Per-instance world matrices (perf effort 08). Plain glDrawElements has
@@ -107,9 +107,27 @@ layout(std140) uniform WorldInstances {
     mat4 worldArr[256];
 };
 
+// The view's active local lights (binding 4)
+layout(std140) uniform LocalLights {
+    vec4 count;        // .x = active light count
+    vec4 pos[64];      // xyz camera-relative world pos, w = startAtten
+    vec4 diffuse[64];  // raw diffuse
+    vec4 ambient[64];  // raw ambient
+    vec4 dir[64];      // xyz beam dir (world), w = isSpot
+} localLights;
+
+// Per gl_InstanceID: which local lights apply. arr[i] = {indices 0..3 as bytes in .x,
+// indices 4..7 in .y, count in .z}.
+layout(std140) uniform LightIndices {
+    uvec4 arr[256];
+} lightIdx;
+
+uniform sampler2D heightMap;
+
 layout(location = 0) in vec3 pos;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
+layout(location = 3) in uint landClip;
 
 out vec4 vColor;
 out vec4 vSpecColor;
@@ -118,9 +136,68 @@ out vec2 vUV1;
 out float vFogTC;
 out vec3 vWorldRel;
 
+vec4 heightCorners(ivec2 base, int stride) {
+    ivec2 sz = textureSize(heightMap, 0);
+    ivec2 i0 = clamp(base,                 ivec2(0), sz - 1);
+    ivec2 i1 = clamp(base + ivec2(stride), ivec2(0), sz - 1);
+    return vec4(texelFetch(heightMap, ivec2(i0.x, i0.y), 0).r,
+                texelFetch(heightMap, ivec2(i1.x, i0.y), 0).r,
+                texelFetch(heightMap, ivec2(i0.x, i1.y), 0).r,
+                texelFetch(heightMap, ivec2(i1.x, i1.y), 0).r);
+}
+
+vec3 surfaceFromCorners(vec4 c, vec2 f, float invGrid) {
+    float h;
+    vec2 grad;
+    if (f.x <= 1.0 - f.y) {
+        h = c.x + (c.z - c.x) * f.y + (c.y - c.x) * f.x;
+        grad = vec2(c.y - c.x, c.z - c.x);
+    } else {
+        h = c.z + (c.y - c.w) - (c.z - c.w) * f.x - (c.y - c.w) * f.y;
+        grad = vec2(c.w - c.z, c.w - c.y);
+    }
+    return vec3(h, grad * invGrid);
+}
+
+vec3 landClipSurface(vec2 absXZ) {
+    vec2 rel = absXZ * hmParams0.x;
+    vec2 base = floor(rel);
+    return surfaceFromCorners(heightCorners(ivec2(base), 1), rel - base, hmParams0.x);
+}
+
+vec3 landPlaneSurface(vec2 absXZ, vec2 objAbsXZ) {
+    float invLandGrid = landGrid.x;
+    int stride = int(landGrid.y);
+    vec2 sq = floor(objAbsXZ * invLandGrid);
+    return surfaceFromCorners(heightCorners(ivec2(sq) * stride, stride), absXZ * invLandGrid - sq, invLandGrid);
+}
+
+vec3 landClipNormal(vec3 n, vec3 surf) {
+    return normalize(vec3(n.x - surf.y * n.y, n.y, n.z - surf.z * n.y));
+}
+
 void main() {
     vec4 worldPos    = worldArr[gl_InstanceID] * vec4(pos, 1.0);
     vec3 worldNormal = normalize(mat3(worldArr[gl_InstanceID]) * normal);
+    int lcMode = int(hmParams1.w + 0.5);
+    if (lcMode == 2 && landGrid.y > 0.0) {
+        vec2 objAbsXZ = worldArr[gl_InstanceID][3].xz + hmParams0.yz;
+        vec3 surf = landPlaneSurface(worldPos.xz + hmParams0.yz, objAbsXZ);
+        worldPos.y = surf.x + pos.y + hmParams1.y - hmParams0.w;
+        worldNormal = landClipNormal(worldNormal, surf);
+    } else if (lcMode == 1 && landClip != 0u && hmParams0.x > 0.0) {
+        vec3 surf = landClipSurface(worldPos.xz + hmParams0.yz);
+        if (landClip == 2u) {
+            worldPos.y = surf.x - hmParams0.w; // ClipLandOn: pin onto surface
+        } else {
+            // ClipLandKeep: keep the authored height above the terrain sampled at the object
+            // anchor (bounding centre), the reference Object::ApplyLandClip subtracts. worldArr
+            // is camera-relative, so re-add camXZ to get the absolute anchor.
+            vec2 anchorXZ = (worldArr[gl_InstanceID] * vec4(-hmParams1.xyz, 1.0)).xz + hmParams0.yz;
+            worldPos.y = worldPos.y + surf.x - landClipSurface(anchorXZ).x;
+        }
+        worldNormal = landClipNormal(worldNormal, surf);
+    }
     vec4 viewPos     = view * worldPos;
     gl_Position      = proj * viewPos;
     vWorldRel        = worldPos.xyz; // camera-relative world pos for cascade shadow lookup
@@ -130,29 +207,31 @@ void main() {
     litColor.rgb = emissive.rgb + ambient.rgb * sunEn.x + diffuse.rgb * NdotL * sunEn.x;
     litColor.a   = emissive.a   + ambient.a   * sunEn.x + diffuse.a   * NdotL * sunEn.x;
 
-    // Local lights (street lamps, vehicle headlights) — per-vertex contribution
-    // mirroring the legacy LightPoint::Apply / LightReflector::Apply.  toLight =
-    // lightPos - vertex (world space); diffuse uses the outward-normal convention
-    // of the sun term above.  Quadratic falloff past startAtten, cut off at 100x.
-    // Spotlights (localLightDir.w > 0.5) additionally gate by a cone factor: full
-    // inside cos 8deg, zero outside cos 12deg, linear in cos^2 between.
+    // Local lights: per-vertex point/spot contribution mirroring LightPoint/LightReflector.
+    // Quadratic falloff past startAtten (cut at 100x); spotlights gate by a cone factor
+    // (full inside cos 8deg, zero outside cos 12deg). DisableSun materials (sunEn.x == 0)
+    // take the full-night strength the legacy SetupLights forced.
     const float MIN_INSIDE2 = 0.95677279; // (cos 12deg)^2
     const float MAX_INSIDE2 = 0.98063081; // (cos 8deg)^2
-    int nLights = int(lightCount.x);
+    float nightLocal = (sunEn.x > 0.5) ? sunEn.y : 1.0;
+    uvec4 li = lightIdx.arr[gl_InstanceID];
+    int nLights = int(li.z);
     for (int i = 0; i < nLights; i++)
     {
-        vec3 toLight = lightPos[i].xyz - worldPos.xyz;
+        uint idx = ((i < 4 ? li.x : li.y) >> (8u * uint(i & 3))) & 0xFFu;
+        vec4 lpos = localLights.pos[idx];
+        vec4 ldir = localLights.dir[idx];
+        vec3 toLight = lpos.xyz - worldPos.xyz;
         float size2 = dot(toLight, toLight);
-        float startAtten2 = lightPos[i].w * lightPos[i].w;
+        float startAtten2 = lpos.w * lpos.w;
         float endAtten2 = startAtten2 * 100.0;
         if (size2 >= endAtten2)
             continue;
 
         float cone = 1.0;
-        if (localLightDir[i].w > 0.5)
+        if (ldir.w > 0.5)
         {
-            // inside = (vertex - light) . beamDir; cos^2(angleFromAxis) = inside^2/size2
-            float inside = -dot(toLight, localLightDir[i].xyz);
+            float inside = -dot(toLight, ldir.xyz);
             if (inside <= 0.0)
                 continue;
             float cos2 = (inside * inside) / size2;
@@ -161,17 +240,19 @@ void main() {
             cone = clamp((cos2 - MIN_INSIDE2) / (MAX_INSIDE2 - MIN_INSIDE2), 0.0, 1.0);
         }
 
+        vec3 ldif = localLights.diffuse[idx].rgb * matDiffuseRaw.rgb * nightLocal;
+        vec3 lamb = localLights.ambient[idx].rgb * matAmbientRaw.rgb * nightLocal;
         float atten = (size2 >= startAtten2) ? (startAtten2 / size2) : 1.0;
         float cosFi = dot(toLight, worldNormal);
         vec3 contrib;
         if (cosFi > 0.0)
         {
             cosFi *= inversesqrt(size2);
-            contrib = (lightDiffuse[i].rgb * cosFi + lightAmbient[i].rgb) * (atten * cone);
+            contrib = (ldif * cosFi + lamb) * (atten * cone);
         }
         else
         {
-            contrib = lightAmbient[i].rgb * atten;
+            contrib = lamb * atten;
         }
         litColor.rgb += contrib;
     }
@@ -607,8 +688,8 @@ layout(std140) uniform VSConstants {
     vec4 specEn;        // c19
     vec4 sunEn;         // c20
     vec4 vpScale;       // c21 — VSScreen only, declared for layout parity
-    vec4 _pad22;
-    vec4 _pad23;
+    vec4 hmParams0;     // c22: terrain heightmap {invGrid, camX, camZ, camY}
+    vec4 hmParams1;     // c23: land clip {boundingCenter.xyz, mode}
     mat4 texMat0;       // c24-c27
     mat4 texMat1;       // c28-c31
     vec4 texCtrl;       // c32
@@ -773,7 +854,7 @@ static GLuint LinkGLProgram(GLuint vs, GLuint fs, const char* name)
     return program;
 }
 
-static float s_vsShadow[280] = {}; // 70 vec4 slots — through SlotLightVP (c66-c69)
+static float s_vsShadow[284] = {}; // 71 vec4 slots through SlotLandGrid
 static float s_psShadow[108] = {}; // 27 vec4 slots — c8-c23 cascadeVP[4], c24 splits, c25 ctl, c26 camFwd
 
 static GLuint s_vsUBO = 0;
@@ -784,6 +865,20 @@ static GLuint s_psUBO = 0;
 static float s_worldSlot0[16] = {};
 static bool s_worldSlot0Valid = false;
 static Poseidon::GL33UploadSnapshot<sizeof(s_vsShadow)> s_vsUploadSnapshot;
+
+// LightIndices UBO (binding 3): light indices packed as bytes (.x = 0..3, .y = 4..7) and a count in .z
+static GLuint s_lightIndicesUBO = 0;
+static uint32_t s_lightIndices[256 * 4] = {};
+
+static GLuint s_localLightsUBO = 0;
+// The LocalLights buffer holds every active light, so it must be at least as large as the
+// scene's active-light cap. Bytes index it, and it must fit the GL 3.3 guaranteed min UBO size.
+static constexpr int kMaxLocalLights = MaxActiveLights;
+static_assert(kMaxLocalLights <= 256, "light index packing uses one byte per index");
+static_assert((1 + 4 * kMaxLocalLights) * 16 <= 16384,
+              "LocalLights UBO exceeds GL 3.3 minimum guaranteed size (16 KB)");
+static_assert(GL33LightIndices::Capacity == VSConst::MaxLocalLights);
+static float s_localLights[(1 + 4 * kMaxLocalLights) * 4] = {};
 
 void EngineGL33::FlushVSConstants()
 {
@@ -865,6 +960,18 @@ void EngineGL33::InitVertexShaders()
     glBindBufferBase(GL_UNIFORM_BUFFER, 2, s_worldUBO);
     s_worldSlot0Valid = false;
 
+    // LightIndices array UBO (binding 3)
+    glGenBuffers(1, &s_lightIndicesUBO);
+    glBindBuffer(GL_UNIFORM_BUFFER, s_lightIndicesUBO);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof(s_lightIndices), s_lightIndices, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 3, s_lightIndicesUBO);
+
+    // LocalLights array UBO (binding 4)
+    glGenBuffers(1, &s_localLightsUBO);
+    glBindBuffer(GL_UNIFORM_BUFFER, s_localLightsUBO);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof(s_localLights), nullptr, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 4, s_localLightsUBO);
+
     _vertexShaderSel = VSNone;
 }
 
@@ -890,6 +997,22 @@ void EngineGL33::DeinitVertexShaders()
         glDeleteBuffers(1, &s_vsUBO);
         s_vsUBO = 0;
     }
+    if (s_worldUBO)
+    {
+        glDeleteBuffers(1, &s_worldUBO);
+        s_worldUBO = 0;
+    }
+    if (s_lightIndicesUBO)
+    {
+        glDeleteBuffers(1, &s_lightIndicesUBO);
+        s_lightIndicesUBO = 0;
+    }
+    if (s_localLightsUBO)
+    {
+        glDeleteBuffers(1, &s_localLightsUBO);
+        s_localLightsUBO = 0;
+    }
+    GL33Bind::Invalidate();
 }
 
 void EngineGL33::SelectVertexShader(VertexShaderID vs)
@@ -960,6 +1083,7 @@ FrameState EngineGL33::BuildFrameState(Camera* camera, LightSun* sun, int bias, 
     frame.sunDir[2] = dir.Z();
     frame.sunDir[3] = 0;
     frame.sunEnabled = sunEnabled;
+    frame.nightEffect = sun->NightEffect();
 
     return frame;
 }
@@ -1094,15 +1218,61 @@ void EngineGL33::UpdateShadowMapLitState()
     FlushPSConstants();
 }
 
-void EngineGL33::UploadVSViewConstants(const FrameState& frame)
+void EngineGL33::SetTerrainHeightmap(const float* heights, int width, int height, float invGrid, float invLandGrid)
 {
-    memcpy(s_vsShadow + VSConst::SlotView * 4, &frame.view, 64);
-    memcpy(s_vsShadow + VSConst::SlotSunDir * 4, frame.sunDir, 16);
-    memcpy(s_vsShadow + VSConst::SlotCamPos * 4, frame.cameraPos, 12);
-    s_vsShadow[VSConst::SlotCamPos * 4 + 3] = 0;
-    float sunEn[4] = {frame.sunEnabled ? 1.0f : 0.0f, 0, 0, 0};
-    memcpy(s_vsShadow + VSConst::SlotSunEn * 4, sunEn, 16);
-    FlushVSConstants();
+    if (!heights || width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    if (_heightMapTex == 0)
+    {
+        glGenTextures(1, &_heightMapTex);
+    }
+
+    GL33Bind::Tex2D(kUploadUnit - GL_TEXTURE0, _heightMapTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, width, height, 0, GL_RED, GL_FLOAT, heights);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    GL33Bind::ActiveUnit(0);
+
+    // .yzw (camX/camZ/camY) are filled per frame in UploadFrameConstants
+    s_vsShadow[VSConst::SlotHmParams0 * 4 + 0] = invGrid;
+    s_vsShadow[VSConst::SlotLandGrid * 4 + 0] = invLandGrid;
+    s_vsShadow[VSConst::SlotLandGrid * 4 + 1] = invLandGrid > 0 ? invGrid / invLandGrid : 0;
+    s_vsShadow[VSConst::SlotLandGrid * 4 + 2] = 0;
+    s_vsShadow[VSConst::SlotLandGrid * 4 + 3] = 0;
+}
+
+bool EngineGL33::LandClipInVS() const
+{
+    // We need the heightmap to be loaded to do land clipping in the vertex shader.
+    return _heightMapTex != 0;
+}
+
+void EngineGL33::SetLandClipParams(float mode, Vector3Par boundingCenter)
+{
+    float v[4] = {0.0f, 0.0f, 0.0f, mode};
+    if (mode > 0.5f)
+    {
+        v[0] = boundingCenter.X();
+        v[1] = boundingCenter.Y();
+        v[2] = boundingCenter.Z();
+    }
+    float* dst = s_vsShadow + VSConst::SlotHmParams1 * 4;
+    if (memcmp(v, dst, sizeof(v)) == 0)
+    {
+        return;
+    }
+    memcpy(dst, v, sizeof(v));
+    if (!s_vsUBO)
+    {
+        return;
+    }
+    GL33Bind::UniformBuffer(s_vsUBO);
+    glBufferSubData(GL_UNIFORM_BUFFER, VSConst::SlotHmParams1 * 4 * sizeof(float), sizeof(v), v);
 }
 
 void EngineGL33::UploadWorldInstances(const float* matrices, int count)
@@ -1167,6 +1337,11 @@ void EngineGL33::UploadVSMaterialConstants(const TLMaterial& mat, bool sunEnable
     memcpy(s_vsShadow + VSConst::SlotDiffuse * 4, diffuse, 16);
     memcpy(s_vsShadow + VSConst::SlotEmissive * 4, emissive, 16);
 
+    float matDiffuseRaw[4] = {mat.diffuse.R(), mat.diffuse.G(), mat.diffuse.B(), mat.diffuse.A()};
+    float matAmbientRaw[4] = {mat.ambient.R(), mat.ambient.G(), mat.ambient.B(), mat.ambient.A()};
+    memcpy(s_vsShadow + VSConst::SlotMatDiffuseRaw * 4, matDiffuseRaw, 16);
+    memcpy(s_vsShadow + VSConst::SlotMatAmbientRaw * 4, matAmbientRaw, 16);
+
     Color specCol = sun->Diffuse() * mat.specular;
     float spec[4] = {specCol.R(), specCol.G(), specCol.B(), static_cast<float>(mat.specularPower)};
     float specEn[4] = {mat.specularPower > 0 ? 1.0f : 0.0f, 0, 0, 0};
@@ -1177,64 +1352,122 @@ void EngineGL33::UploadVSMaterialConstants(const TLMaterial& mat, bool sunEnable
 }
 
 // Upload the active local (point) lights for per-vertex night illumination.
-// Diffuse/ambient are pre-scaled by NightEffect so daytime contributes nothing.
 // Positions are stored camera-relative to match the VS world transform, which
 // subtracts the camera position (PrepareMeshTLImpl camera-relative rendering).
-void EngineGL33::UploadVSLights(const LightList& lights, const TLMaterial& mat, float nightEffect)
+void EngineGL33::UploadLocalLights(const LightList& aLights)
 {
     const float* camPos = _frameState.cameraPos;
+    _localLightIndices.clear();
     int n = 0;
-    if (nightEffect > 0.0f)
+    for (int i = 0; i < aLights.Size() && n < kMaxLocalLights; i++)
     {
-        // Match the legacy ConvertLight: diffuse/ambient are scaled by NightEffect
-        // and modulated by the material, so the per-vertex contribution lands in
-        // the same space as the sun term (which also folds in mat.diffuse).
-        Color matDif = mat.diffuse * nightEffect;
-        Color matAmb = mat.ambient * nightEffect;
-        for (int i = 0; i < lights.Size() && n < VSConst::MaxLocalLights; i++)
-        {
-            Light* light = lights[i];
-            if (!light)
-                continue;
-            LightDescription desc;
-            light->GetDescription(desc);
-            bool isSpot = desc.type == LTSpotLight;
-            if (desc.type != LTPoint && !isSpot)
-                continue; // point + spot lights; directional (sun) handled separately
+        Light* light = aLights[i];
+        if (!light)
+            continue;
+        LightDescription desc;
+        light->GetDescription(desc);
+        bool isSpot = desc.type == LTSpotLight;
+        if (desc.type != LTPoint && !isSpot)
+            continue;
 
-            float* p = s_vsShadow + (VSConst::SlotLightPos + n) * 4;
-            p[0] = desc.pos.X() - camPos[0];
-            p[1] = desc.pos.Y() - camPos[1];
-            p[2] = desc.pos.Z() - camPos[2];
-            p[3] = desc.startAtten;
+        _localLightIndices[light] = n;
 
-            float* dir = s_vsShadow + (VSConst::SlotLightDir + n) * 4;
-            Vector3 beam = desc.dir;
-            beam.Normalize();
-            dir[0] = beam.X();
-            dir[1] = beam.Y();
-            dir[2] = beam.Z();
-            dir[3] = isSpot ? 1.0f : 0.0f;
+        float* p = s_localLights + (1 + n) * 4;
+        p[0] = desc.pos.X() - camPos[0];
+        p[1] = desc.pos.Y() - camPos[1];
+        p[2] = desc.pos.Z() - camPos[2];
+        p[3] = desc.startAtten;
 
-            Color dif = desc.diffuse * matDif;
-            float* df = s_vsShadow + (VSConst::SlotLightDiffuse + n) * 4;
-            df[0] = dif.R();
-            df[1] = dif.G();
-            df[2] = dif.B();
-            df[3] = 0.0f;
+        float* df = s_localLights + (1 + kMaxLocalLights + n) * 4;
+        df[0] = desc.diffuse.R();
+        df[1] = desc.diffuse.G();
+        df[2] = desc.diffuse.B();
+        df[3] = 0.0f;
 
-            Color amb = desc.ambient * matAmb;
-            float* am = s_vsShadow + (VSConst::SlotLightAmbient + n) * 4;
-            am[0] = amb.R();
-            am[1] = amb.G();
-            am[2] = amb.B();
-            am[3] = 0.0f;
+        float* am = s_localLights + (1 + 2 * kMaxLocalLights + n) * 4;
+        am[0] = desc.ambient.R();
+        am[1] = desc.ambient.G();
+        am[2] = desc.ambient.B();
+        am[3] = 0.0f;
 
-            n++;
-        }
+        float* dir = s_localLights + (1 + 3 * kMaxLocalLights + n) * 4;
+        Vector3 beam = desc.dir;
+        beam.Normalize();
+        dir[0] = beam.X();
+        dir[1] = beam.Y();
+        dir[2] = beam.Z();
+        dir[3] = isSpot ? 1.0f : 0.0f;
+
+        n++;
     }
-    s_vsShadow[VSConst::SlotLightCount * 4] = static_cast<float>(n);
-    FlushVSConstants();
+    s_localLights[0] = static_cast<float>(n);
+    if (!s_localLightsUBO)
+        return;
+    GL33Bind::UniformBuffer(s_localLightsUBO);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(s_localLights), s_localLights);
+}
+
+// Looks up the indices of the provided lights in the local light buffer,
+// returning the count of found lights and writing their indices to out[].
+int EngineGL33::ResolveLocalLightIndices(const LightList& lights, int* out) const
+{
+    int n = 0;
+    for (int i = 0; i < lights.Size() && n < VSConst::MaxLocalLights; i++)
+    {
+        Light* l = lights[i];
+        if (!l)
+            continue;
+        auto it = _localLightIndices.find(l);
+        if (it != _localLightIndices.end())
+            out[n++] = it->second;
+    }
+    return n;
+}
+
+// Set the current draw's local-light selection. Only used for non-instanced draws.
+void EngineGL33::SetLocalLightIndices(const int* indices, int count)
+{
+    if (count > VSConst::MaxLocalLights)
+        count = VSConst::MaxLocalLights;
+
+    const auto packed = GL33LightIndices::Pack(indices, count);
+
+    // slot 0
+    uint32_t* dst = s_lightIndices;
+    if (dst[0] == packed[0] && dst[1] == packed[1] && dst[2] == packed[2])
+        return;
+
+    dst[0] = packed[0];
+    dst[1] = packed[1];
+    dst[2] = packed[2];
+    dst[3] = packed[3];
+
+    if (!s_lightIndicesUBO)
+        return;
+
+    GL33Bind::UniformBuffer(s_lightIndicesUBO);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, 16, dst);
+}
+
+void EngineGL33::PackInstanceLights(int slot, const LightList& lights)
+{
+    if (slot < 0 || slot >= 256)
+        return;
+    int idx[VSConst::MaxLocalLights];
+    int n = ResolveLocalLightIndices(lights, idx);
+    const auto packed = GL33LightIndices::Pack(idx, n);
+    memcpy(_instLightIdx + slot * 4, packed.data(), sizeof(packed));
+}
+
+void EngineGL33::UploadInstanceLightIndices(int count)
+{
+    if (count <= 0 || !s_lightIndicesUBO)
+        return;
+    if (count > 256)
+        count = 256;
+    memcpy(s_lightIndices, _instLightIdx, count * 16);
+    GL33Bind::UniformBuffer(s_lightIndicesUBO);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, count * 16, s_lightIndices);
 }
 
 void EngineGL33::UploadVSTexGenConstants(TexGenMode mode)
@@ -1298,7 +1531,7 @@ void EngineGL33::UploadFrameConstants(const FrameState& frame)
 
     memcpy(s_vsShadow + VSConst::SlotSunDir * 4, frame.sunDir, 16);
 
-    float sunEn[4] = {frame.sunEnabled ? 1.0f : 0.0f, 0, 0, 0};
+    float sunEn[4] = {frame.sunEnabled ? 1.0f : 0.0f, frame.nightEffect, 0, 0};
     memcpy(s_vsShadow + VSConst::SlotSunEn * 4, sunEn, 16);
 
     memcpy(s_vsShadow + VSConst::SlotFogParam * 4, frame.fogParams, 16);
@@ -1309,7 +1542,16 @@ void EngineGL33::UploadFrameConstants(const FrameState& frame)
     float texCtrl[4] = {0, 0, 0, 0};
     memcpy(s_vsShadow + VSConst::SlotTexCtrl * 4, texCtrl, 16);
 
+    // Land clip reconstructs absolute world XZ (and Y) from the camera-relative worldPos.
+    s_vsShadow[VSConst::SlotHmParams0 * 4 + 1] = frame.cameraPos[0];
+    s_vsShadow[VSConst::SlotHmParams0 * 4 + 2] = frame.cameraPos[2];
+    s_vsShadow[VSConst::SlotHmParams0 * 4 + 3] = frame.cameraPos[1];
+
     FlushVSConstants();
+
+    if (_heightMapTex)
+        GL33Bind::Tex2D(3, _heightMapTex);
+    GL33Bind::ActiveUnit(0);
 
     UploadPSFogColor(Color(frame.fogColor[0], frame.fogColor[1], frame.fogColor[2], frame.fogColor[3]));
 }
@@ -1550,6 +1792,12 @@ void EngineGL33::InitPixelShaders()
         GLuint wiBlock = glGetUniformBlockIndex(prog, "WorldInstances");
         if (wiBlock != GL_INVALID_INDEX)
             glUniformBlockBinding(prog, wiBlock, 2);
+        GLuint llBlock = glGetUniformBlockIndex(prog, "LocalLights");
+        if (llBlock != GL_INVALID_INDEX)
+            glUniformBlockBinding(prog, llBlock, 4);
+        GLuint liBlock = glGetUniformBlockIndex(prog, "LightIndices");
+        if (liBlock != GL_INVALID_INDEX)
+            glUniformBlockBinding(prog, liBlock, 3);
         GLuint vsBlock = glGetUniformBlockIndex(prog, "VSConstants");
         GLuint psBlock = glGetUniformBlockIndex(prog, "PSConstants");
         if (vsBlock != GL_INVALID_INDEX)
@@ -1566,6 +1814,9 @@ void EngineGL33::InitPixelShaders()
         GLint locShadow = glGetUniformLocation(prog, "shadowMap");
         if (locShadow >= 0)
             glUniform1i(locShadow, 2); // shadow depth map on texture unit 2
+        GLint locHeight = glGetUniformLocation(prog, "heightMap");
+        if (locHeight >= 0)
+            glUniform1i(locHeight, 3); // terrain height map on texture unit 3
         glUseProgram(0);
     };
 
