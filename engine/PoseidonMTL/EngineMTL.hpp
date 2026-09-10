@@ -167,6 +167,13 @@ class EngineMTL : public Engine
 
     AbstractTextBank* TextBank() override;
     void TextureDestroyed(Texture* /*tex*/) override {}
+    // Mirrors EngineGL33::ResetForRemount: drop the GPU textures tied to the
+    // old mod set so the new set reloads on demand. No GL33-style bind/
+    // pipeline-cache invalidation needed -- Metal has no equivalent global
+    // cache, and the caller (GameApplication::ReloadGameContent*) already
+    // clears m_canRender before this runs, so there's no in-flight queued
+    // draw that could reference a texture this releases.
+    void ResetForRemount() override;
 
     float ZShadowEpsilon() const override { return 0.01f; }
     float ZRoadEpsilon() const override { return 0.005f; }

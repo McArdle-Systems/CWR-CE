@@ -33,6 +33,12 @@ class TextBankMTL : public AbstractTextBank
     TextureMTL* GetGrassTexture();
     TextureMTL* GetSpecularTexture();
     TextureMTL* GetWaterBumpMap();
+    int NDetailTextureLoads() const override { return _detailTextureLoads; }
+    // Mirrors GL33's TextBankGL33::ReleaseDetailTextures: drops the cached
+    // detail/specular/grass/water-bump set so a remount's InitDetailTextures()
+    // rebuilds it from the reloaded CfgDetailTextures instead of keeping the
+    // previous mod's set.
+    void ReleaseDetailTextures();
 
     // Font-atlas pages etc. -- AbstractTextBank's default returns nullptr,
     // which silently dropped every FreeType glyph-atlas upload under this
@@ -109,6 +115,7 @@ class TextBankMTL : public AbstractTextBank
     Ref<TextureMTL> _specular;
     Ref<TextureMTL> _grass;
     Ref<TextureMTL> _waterBump;
+    int _detailTextureLoads = 0;
 };
 
 } // namespace Poseidon
