@@ -78,6 +78,7 @@ void TextBankMTL::InitDetailTextures()
     if (_detail || _grass || _specular || _waterBump)
         return;
 
+    _detailTextureLoads++;
     const ParamEntry& names = Remaster >> "CfgDetailTextures";
     auto loadDetail = [this](RStringB name, int maxSize = 4096) -> Ref<TextureMTL>
     {
@@ -196,6 +197,19 @@ void TextBankMTL::ReleaseAllTextures()
     _totalBigSurfaceBytes = 0;
     _bootstrap->ClearTexturePool();
     _totalPooledBytes = 0;
+}
+
+void TextBankMTL::ReleaseDetailTextures()
+{
+    // These four Refs are the *strong* owners of the detail set -- _texture
+    // holds only weak, auto-nulling links (LLinkArray), so dropping them here
+    // is what actually destroys the textures. InitDetailTextures() keys its
+    // early-out off them being null, so this is also what lets the set rebuild
+    // from a reloaded CfgDetailTextures.
+    _detail.Free();
+    _specular.Free();
+    _grass.Free();
+    _waterBump.Free();
 }
 
 void TextBankMTL::ReserveMemory(int64_t neededBytes)
