@@ -301,14 +301,26 @@ public:
 
 	// Get min-max of object after animate. Default (generic) implementation may be slow when shape is complex.
 	virtual void AnimatedMinMax( int level, Vector3 *minMax );
+	bool AnimBBoxCacheable( int level ) const;
+	bool CachedAnimatedMinMax( int level, Vector3 *minMax ) const;
 	// Get bounding sphere of object after animate. Default (generic) implementation may be slow when shape is complex.
 	virtual void AnimatedBSphere( int level, Vector3 &bCenter, float &bRadius, bool isAnimated );
 
 	virtual bool IsAnimated( int level ) const; // appearence changed with Animate
 	virtual bool IsAnimatedShadow( int level ) const; // shadow changed with Animate
+	virtual bool DeformsSharedShape( int level ) const;
 
 	// True when the shape snaps to the landscape surface (ClipLandKeep/ClipLandOn).
-	bool HasLandClip( int level ) const;
+	virtual bool HasLandClip( int level ) const;
+
+	enum LandClipMode
+	{
+		LandClipNone = 0,
+		LandClipVertex = 1,
+		LandClipPlane = 2,
+	};
+	virtual LandClipMode GetLandClipMode( int level ) const;
+	static bool RenderHandlesLandClip();
 
 	// Change object position. Used when object is already present in landscape.
 	virtual void Move(Matrix4Par transform);

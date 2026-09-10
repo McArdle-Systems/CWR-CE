@@ -1,9 +1,16 @@
-// Unit tests for PoseidonBase platform path utilities
+// Unit tests for PoseidonBase platform utilities
 
 #include <catch2/catch_test_macros.hpp>
 #include <Poseidon/Foundation/platform.hpp>
 #include <string.h>
 #include <string>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <system_error>
+#endif
 
 #ifndef _WIN32
 #include "../../Support/test_fixtures.hpp"
