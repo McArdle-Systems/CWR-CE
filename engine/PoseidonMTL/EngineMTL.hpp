@@ -126,11 +126,12 @@ class EngineMTL : public Engine
     int GetMsaaSamples() const override { return _bootstrap.MsaaSamples(); }
     void SetRenderScale(float scale) override { _bootstrap.SetRenderScale(scale); }
     float GetRenderScale() const override { return _bootstrap.RenderScale(); }
-    // TODO: stored only. Coverage-from-alpha needs the cutout fragment
-    // shaders to emit sharpened coverage in alpha instead of discarding
-    // (GL33's PSAlphaToCoverage path); until then MSAA edges on cutouts
-    // come from the discard threshold alone.
-    void SetAlphaToCoverage(bool enable) override { _alphaToCoverage = enable; }
+    void SetAlphaToCoverage(bool enable) override
+    {
+        _alphaToCoverage = enable;
+        _bootstrap.SetAlphaToCoverage(enable);
+    }
+    bool GetAlphaToCoverage() const override { return _alphaToCoverage && _bootstrap.MsaaSamples() > 1; }
 
     void PrepareTriangle(const MipInfo& mip, int specFlags) override;
     void DrawPolygon(const VertexIndex* i, int n) override;
@@ -271,7 +272,7 @@ class EngineMTL : public Engine
     bool _windowed;
     int _bias = 0;
     float _gamma = 1.0f;
-    bool _alphaToCoverage = false;
+    bool _alphaToCoverage = true;
     float _nightEye = 0.0f;
     bool _reorderQueues = false;
     float _nightEyeCoef[4] = {0.0f, 0.0f, 0.0f, 1.0f};

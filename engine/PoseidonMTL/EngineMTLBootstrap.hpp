@@ -187,6 +187,7 @@ class EngineMTLBootstrap
     void SetRenderScale(float scale); // 1..2
     float RenderScale() const;
     void SetGamma(float gamma);
+    void SetAlphaToCoverage(bool enabled); // cutout coverage through the MSAA resolve; no-op without MSAA
     // Frames that will be read back present without gamma: GL33's capture
     // re-resolves the frame target over its gamma pass, so its screenshots
     // and Trident samples are pre-gamma, and the tests are tuned to that.

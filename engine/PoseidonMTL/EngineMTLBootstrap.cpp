@@ -436,6 +436,10 @@ static inline float4 applyDetailMode(float4 baseTex, float3 diffuseLit, float3 s
 // anti-aliased text/needle edges routinely dip under 50% coverage) turned that into
 // a visible stipple across the whole surface instead of a clean edge.
 constant float kSolidCutoutCoverage = 0.5;
+// Set on the alpha-to-coverage variant of the opaque pipeline: cutout
+// coverage is sharpened around the threshold and handed to the multisample
+// resolve through alpha (GL33's alphaRef.z path) instead of a hard discard.
+constant bool kAlphaToCoverage [[function_constant(0)]];
 
 // Opaque-pipeline fragment shader (blending disabled at the pipeline level,
 // pipelineStateTLOpaque) -- used for every section EXCEPT true Blend
@@ -456,6 +460,7 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
                              sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]])
 {
     float4 texColor = tex.sample(samp, in.uv);
+    float outAlpha = -1.0;
     if (in.isCutout > 0.5)
     {
         // Coverage must come from the texture's own alpha only. in.color.a is
@@ -464,7 +469,14 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
         // -- multiplying it in here made a fully-opaque leaf texel's coverage collapse
         // to ~0.05 at dawn, discarding nearly all foliage fragments (GitHub #60).
         float coverage = texColor.a;
-        if (coverage < kSolidCutoutCoverage)
+        if (kAlphaToCoverage)
+        {
+            float cov = saturate((coverage - kSolidCutoutCoverage) / max(fwidth(coverage), 1e-4) + 0.5);
+            if (cov <= 0.0)
+                discard_fragment();
+            outAlpha = cov;
+        }
+        else if (coverage < kSolidCutoutCoverage)
             discard_fragment();
     }
     float3 diffuseLit = texColor.rgb * in.color.rgb;
@@ -472,7 +484,7 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
     float3 finalColor = mix(applyNightEye(detailed.rgb, frame.nightEyeCoef), frame.fogColor.rgb, in.fogFactor);
     if (frame.fogParams.w > 0.5)
         return float4(1.0, 0.0, 0.0, 1.0);
-    return float4(finalColor, in.color.a * detailed.a);
+    return float4(finalColor, outAlpha >= 0.0 ? outAlpha : in.color.a * detailed.a);
 }
 
 // Blend-pipeline fragment shader (blending enabled, pipelineStateTLBlend) --
@@ -725,7 +737,9 @@ struct EngineMTLBootstrap::Impl
     // blending so opaque/cutout sections never have blending enabled, same
     // split GL33 gets from its opaque-pass-vs-BlendOnly-pass routing (see
     // DrawSectionTL's blendEnabled parameter).
-    MTL::RenderPipelineState* pipelineStateTL = nullptr;      // fsMeshOpaque, blending disabled
+    MTL::RenderPipelineState* pipelineStateTL = nullptr;    // fsMeshOpaque, blending disabled
+    MTL::RenderPipelineState* pipelineStateTLA2C = nullptr; // fsMeshOpaque with kAlphaToCoverage, MSAA only
+    bool alphaToCoverage = true;
     MTL::RenderPipelineState* pipelineStateTLBlend = nullptr; // fsMeshBlend, blending enabled
     // Single-pass shadow variant for the hardware-TL path: vsMesh/fsShadow,
     // color writes ON, Shadow blend factors (Zero, OneMinusSourceAlpha) --
@@ -1119,6 +1133,11 @@ void EngineMTLBootstrap::SetGamma(float gamma)
     _impl->gamma = gamma > 0.0f ? gamma : 1.0f;
 }
 
+void EngineMTLBootstrap::SetAlphaToCoverage(bool enabled)
+{
+    _impl->alphaToCoverage = enabled;
+}
+
 void EngineMTLBootstrap::SetReadbackFrame(bool readback)
 {
     _impl->readbackFrame = readback;
@@ -1215,10 +1234,10 @@ void EngineMTLBootstrap::ReleaseFrameTarget()
 
 void EngineMTLBootstrap::ReleaseRenderPipelines()
 {
-    MTL::RenderPipelineState** states[] = {&_impl->pipelineState,         &_impl->pipelineState2DAdditive,
-                                           &_impl->pipelineState2DShadow, &_impl->pipelineStateTL,
-                                           &_impl->pipelineStateTLBlend,  &_impl->pipelineStateTLAdditive,
-                                           &_impl->pipelineStateTLShadow};
+    MTL::RenderPipelineState** states[] = {&_impl->pipelineState,           &_impl->pipelineState2DAdditive,
+                                           &_impl->pipelineState2DShadow,   &_impl->pipelineStateTL,
+                                           &_impl->pipelineStateTLA2C,      &_impl->pipelineStateTLBlend,
+                                           &_impl->pipelineStateTLAdditive, &_impl->pipelineStateTLShadow};
     for (MTL::RenderPipelineState** state : states)
     {
         if (*state != nullptr)
@@ -1595,8 +1614,21 @@ void EngineMTLBootstrap::EnsureTLPipeline()
     }
 
     MTL::Function* vsFn = library->newFunction(NS::String::string("vsMesh", NS::StringEncoding::UTF8StringEncoding));
-    MTL::Function* fsFnOpaque =
-        library->newFunction(NS::String::string("fsMeshOpaque", NS::StringEncoding::UTF8StringEncoding));
+    // fsMeshOpaque carries a function constant, so both variants must be
+    // specialized explicitly -- Metal rejects the unspecialized function.
+    auto specializeOpaque = [&](bool alphaToCoverage) -> MTL::Function*
+    {
+        MTL::FunctionConstantValues* constants = MTL::FunctionConstantValues::alloc()->init();
+        constants->setConstantValue(&alphaToCoverage, MTL::DataTypeBool, NS::UInteger(0));
+        MTL::Function* fn = library->newFunction(
+            NS::String::string("fsMeshOpaque", NS::StringEncoding::UTF8StringEncoding), constants, &error);
+        constants->release();
+        if (fn == nullptr)
+            LOG_ERROR(Graphics, "EngineMTLBootstrap: fsMeshOpaque specialization (a2c={}) failed: {}", alphaToCoverage,
+                      error ? error->localizedDescription()->utf8String() : "(unknown)");
+        return fn;
+    };
+    MTL::Function* fsFnOpaque = specializeOpaque(false);
     MTL::Function* fsFnBlend =
         library->newFunction(NS::String::string("fsMeshBlend", NS::StringEncoding::UTF8StringEncoding));
     MTL::Function* fsFnShadow =
@@ -1622,6 +1654,24 @@ void EngineMTLBootstrap::EnsureTLPipeline()
     {
         LOG_ERROR(Graphics, "EngineMTLBootstrap: mesh pipeline state creation failed: {}",
                   error ? error->localizedDescription()->utf8String() : "(unknown)");
+    }
+
+    if (_impl->frameSampleCount > 1)
+    {
+        MTL::Function* fsFnA2C = specializeOpaque(true);
+        if (fsFnA2C != nullptr)
+        {
+            desc->setFragmentFunction(fsFnA2C);
+            desc->setAlphaToCoverageEnabled(true);
+            _impl->pipelineStateTLA2C = _impl->device->newRenderPipelineState(desc, &error);
+            if (_impl->pipelineStateTLA2C == nullptr)
+            {
+                LOG_ERROR(Graphics, "EngineMTLBootstrap: mesh alpha-to-coverage pipeline state creation failed: {}",
+                          error ? error->localizedDescription()->utf8String() : "(unknown)");
+            }
+            desc->setAlphaToCoverageEnabled(false);
+            fsFnA2C->release();
+        }
     }
 
     // Blend variant: same vertex stage + depth format, fsMeshBlend fragment
@@ -1682,7 +1732,8 @@ void EngineMTLBootstrap::EnsureTLPipeline()
 
     desc->release();
     vsFn->release();
-    fsFnOpaque->release();
+    if (fsFnOpaque != nullptr)
+        fsFnOpaque->release();
     fsFnBlend->release();
     fsFnShadow->release();
     vsFnShadow->release();
@@ -2308,6 +2359,11 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     // descriptor mode) falls back
     // to the no-blend Opaque/Cutout pipeline.
     MTL::RenderPipelineState* pipeline = _impl->pipelineStateTL;
+    // GL33 gates alpha-to-coverage to opaque, alpha-tested mesh draws (its
+    // ApplyPassState a2c) -- here, measured cutouts on the opaque pipeline.
+    if (_impl->alphaToCoverage && _impl->pipelineStateTLA2C != nullptr &&
+        blendMode == Poseidon::render::BlendMode::Opaque && obj.flags[0] > 0.5f)
+        pipeline = _impl->pipelineStateTLA2C;
     if (blendMode == Poseidon::render::BlendMode::Shadow)
         pipeline = _impl->pipelineStateTLShadow;
     else if (blendMode == Poseidon::render::BlendMode::Additive)
@@ -2613,6 +2669,11 @@ void EngineMTLBootstrap::Shutdown()
     {
         _impl->pipelineStateTL->release();
         _impl->pipelineStateTL = nullptr;
+    }
+    if (_impl->pipelineStateTLA2C != nullptr)
+    {
+        _impl->pipelineStateTLA2C->release();
+        _impl->pipelineStateTLA2C = nullptr;
     }
     if (_impl->pipelineStateTLBlend != nullptr)
     {
