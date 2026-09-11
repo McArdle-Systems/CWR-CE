@@ -185,6 +185,8 @@ struct VertexMesh {
     packed_float3 pos;
     packed_float3 norm;
     float2 uv;
+    uint landClip; // 0 rigid, 1 ClipLandKeep, 2 ClipLandOn
+    uint pad;
 };
 
 struct Mat4Rows {
@@ -199,6 +201,8 @@ struct FrameConstants {
     float4 fogColor;
     float4 waterSunDirAndTime;
     float4 nightEyeCoef;
+    float4 hmParams; // {invGrid, camX, camZ, camY}
+    float4 landGrid; // {invLandGrid, heightmap texels per land square, 0, 0}
 };
 
 // GL33's psNormal/psDetail night-eye term: pull colour toward luminance as
@@ -234,6 +238,7 @@ struct ObjectConstants {
     float4 instanced;   // x = 1.0 when world/lights come from the Instance array
     float4 matDiffuseRaw; // material diffuse * night, for the light-table path
     float4 matAmbientRaw; // material ambient * night, for the light-table path
+    float4 landClip;      // {boundingCenter.xyz, mode}
 };
 
 // Per-instance data for instanced runs (InstanceMTL). lightIdx packs up to
@@ -259,6 +264,59 @@ static inline float3 mulRowVec3(float3 p, Mat4Rows m)
 {
     return float3(p.x * m.r0.x + p.y * m.r1.x + p.z * m.r2.x, p.x * m.r0.y + p.y * m.r1.y + p.z * m.r2.y,
                   p.x * m.r0.z + p.y * m.r1.z + p.z * m.r2.z);
+}
+
+// GPU land clip -- ported from GL33's s_vsTransformGLSL. Samples the terrain
+// height grid at absolute XZ and returns {height, dh/dx, dh/dz} of the
+// triangle the point falls in (the grid square's diagonal split matches
+// Landscape's CPU surface evaluation).
+static inline float4 heightCorners(texture2d<float> heightMap, int2 base, int stride)
+{
+    int2 sz = int2(heightMap.get_width(), heightMap.get_height());
+    int2 i0 = clamp(base, int2(0), sz - 1);
+    int2 i1 = clamp(base + int2(stride), int2(0), sz - 1);
+    return float4(heightMap.read(uint2(i0.x, i0.y)).r, heightMap.read(uint2(i1.x, i0.y)).r,
+                  heightMap.read(uint2(i0.x, i1.y)).r, heightMap.read(uint2(i1.x, i1.y)).r);
+}
+
+static inline float3 surfaceFromCorners(float4 c, float2 f, float invGrid)
+{
+    float h;
+    float2 grad;
+    if (f.x <= 1.0 - f.y)
+    {
+        h = c.x + (c.z - c.x) * f.y + (c.y - c.x) * f.x;
+        grad = float2(c.y - c.x, c.z - c.x);
+    }
+    else
+    {
+        h = c.z + (c.y - c.w) - (c.z - c.w) * f.x - (c.y - c.w) * f.y;
+        grad = float2(c.w - c.z, c.w - c.y);
+    }
+    return float3(h, grad * invGrid);
+}
+
+static inline float3 landClipSurface(texture2d<float> heightMap, float2 absXZ, float invGrid)
+{
+    float2 rel = absXZ * invGrid;
+    float2 base = floor(rel);
+    return surfaceFromCorners(heightCorners(heightMap, int2(base), 1), rel - base, invGrid);
+}
+
+// Mode 2: the whole object rides one land square's plane (the square under
+// the object origin), like the CPU ApplyLandClip's plane mode.
+static inline float3 landPlaneSurface(texture2d<float> heightMap, float2 absXZ, float2 objAbsXZ, float4 landGrid)
+{
+    float invLandGrid = landGrid.x;
+    int stride = int(landGrid.y);
+    float2 sq = floor(objAbsXZ * invLandGrid);
+    return surfaceFromCorners(heightCorners(heightMap, int2(sq) * stride, stride), absXZ * invLandGrid - sq,
+                              invLandGrid);
+}
+
+static inline float3 landClipNormal(float3 n, float3 surf)
+{
+    return normalize(float3(n.x - surf.y * n.y, n.y, n.z - surf.z * n.y));
 }
 
 // One local light's per-vertex contribution -- ported from GL33's loop in
@@ -317,7 +375,8 @@ struct VSOutMesh {
 vertex VSOutMesh vsMesh(uint vid [[vertex_id]], uint iid [[instance_id]],
                         const device VertexMesh* verts [[buffer(0)]], constant ObjectConstants& obj [[buffer(1)]],
                         constant FrameConstants& frame [[buffer(2)]], const device Instance* instances [[buffer(3)]],
-                        constant LocalLightTable& lightTable [[buffer(4)]])
+                        constant LocalLightTable& lightTable [[buffer(4)]],
+                        texture2d<float> heightMap [[texture(0)]])
 {
     VertexMesh v = verts[vid];
     Instance inst = instances[iid];
@@ -331,6 +390,37 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], uint iid [[instance_id]],
     // separate view-space step needed for that.
     float4 worldPos4 = mulRowVec4(float4(v.pos, 1.0), world);
     float3 worldNorm = normalize(mulRowVec3(v.norm, world));
+
+    // Land clip on the GPU (Engine::LandClipInVS): the CPU skipped its
+    // ApplyLandClip deform, so snap here. frame.hmParams.yz re-adds the
+    // absolute camera XZ; .w removes the camera Y again from the sampled
+    // absolute height.
+    int lcMode = int(obj.landClip.w + 0.5);
+    float invGrid = frame.hmParams.x;
+    if (lcMode == 2 && frame.landGrid.y > 0.0)
+    {
+        float2 objAbsXZ = float2(world.r3.x, world.r3.z) + frame.hmParams.yz;
+        float3 surf = landPlaneSurface(heightMap, worldPos4.xz + frame.hmParams.yz, objAbsXZ, frame.landGrid);
+        worldPos4.y = surf.x + v.pos.y + obj.landClip.y - frame.hmParams.w;
+        worldNorm = landClipNormal(worldNorm, surf);
+    }
+    else if (lcMode == 1 && v.landClip != 0u && invGrid > 0.0)
+    {
+        float3 surf = landClipSurface(heightMap, worldPos4.xz + frame.hmParams.yz, invGrid);
+        if (v.landClip == 2u)
+        {
+            worldPos4.y = surf.x - frame.hmParams.w; // ClipLandOn: pin onto the surface
+        }
+        else
+        {
+            // ClipLandKeep: keep the authored height above the terrain at the
+            // object anchor (bounding centre), as Object::ApplyLandClip does.
+            float4 anchor = mulRowVec4(float4(-obj.landClip.xyz, 1.0), world);
+            float2 anchorXZ = anchor.xz + frame.hmParams.yz;
+            worldPos4.y = worldPos4.y + surf.x - landClipSurface(heightMap, anchorXZ, invGrid).x;
+        }
+        worldNorm = landClipNormal(worldNorm, surf);
+    }
 
     float4 viewPos = mulRowVec4(worldPos4, frame.view);
     float4 clipPos = mulRowVec4(viewPos, frame.projection);
@@ -890,6 +980,7 @@ struct EngineMTLBootstrap::Impl
     // and an empty light table, so the vertex stage always has valid buffers.
     MTL::Buffer* fallbackInstance = nullptr;
     MTL::Buffer* fallbackLightTable = nullptr;
+    MTL::Texture* heightMap = nullptr; // SetTerrainHeightmap; fallbackWhite stands in until then
 
     bool StreamAlloc(size_t bytes, MTL::Buffer*& outBuffer, size_t& outOffset)
     {
@@ -2532,6 +2623,7 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
         _impl->currentEncoder->setVertexBuffer(_impl->lightTableBuffer, _impl->lightTableOffset, 4);
     else
         _impl->currentEncoder->setVertexBuffer(_impl->fallbackLightTable, 0, 4);
+    _impl->currentEncoder->setVertexTexture(_impl->heightMap != nullptr ? _impl->heightMap : _impl->fallbackWhite, 0);
     _impl->currentEncoder->setFragmentBytes(&frame, sizeof(frame), 0);
     _impl->currentEncoder->setFragmentBytes(&objDraw, sizeof(objDraw), 1);
     _impl->currentEncoder->setFragmentTexture(tex, 0);
@@ -2546,6 +2638,33 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
         _impl->currentEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(indexCount),
                                                      MTL::IndexTypeUInt16, ibuf, offsetBytes);
     ++Poseidon::gPerfDrawCalls;
+}
+
+bool EngineMTLBootstrap::SetTerrainHeightmap(const float* heights, int width, int height)
+{
+    if (_impl->device == nullptr || heights == nullptr || width <= 0 || height <= 0)
+        return false;
+    if (_impl->heightMap != nullptr &&
+        (static_cast<int>(_impl->heightMap->width()) != width || static_cast<int>(_impl->heightMap->height()) != height))
+    {
+        _impl->heightMap->release(); // command buffers retain what their draws reference
+        _impl->heightMap = nullptr;
+    }
+    if (_impl->heightMap == nullptr)
+    {
+        MTL::TextureDescriptor* desc = MTL::TextureDescriptor::texture2DDescriptor(
+            MTL::PixelFormatR32Float, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height), false);
+        desc->setUsage(MTL::TextureUsageShaderRead);
+        desc->setStorageMode(MTL::StorageModeShared);
+        _impl->heightMap = _impl->device->newTexture(desc);
+        desc->release();
+        if (_impl->heightMap == nullptr)
+            return false;
+    }
+    _impl->heightMap->replaceRegion(
+        MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height)), 0, heights,
+        static_cast<NS::UInteger>(width) * sizeof(float));
+    return true;
 }
 
 void EngineMTLBootstrap::UploadLocalLightTable(const LocalLightTableMTL& table)
@@ -2821,6 +2940,11 @@ void EngineMTLBootstrap::Shutdown()
     _impl->instanceBuffer = nullptr;
     _impl->instanceCount = 0;
     _impl->lightTableBuffer = nullptr;
+    if (_impl->heightMap != nullptr)
+    {
+        _impl->heightMap->release();
+        _impl->heightMap = nullptr;
+    }
     for (MTL::Buffer** buf : {&_impl->fallbackInstance, &_impl->fallbackLightTable})
     {
         if (*buf != nullptr)

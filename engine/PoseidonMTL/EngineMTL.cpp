@@ -1080,6 +1080,12 @@ void EngineMTL::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelT
     GfxMatrix world;
     ConvertMatrix(world, modelToWorld);
     const Vector3 camPos = camera->Position();
+    _tlFrame.hmParams[0] = _heightmapValid ? _hmInvGrid : 0.0f;
+    _tlFrame.hmParams[1] = static_cast<float>(camPos.X());
+    _tlFrame.hmParams[2] = static_cast<float>(camPos.Z());
+    _tlFrame.hmParams[3] = static_cast<float>(camPos.Y());
+    _tlFrame.landGrid[0] = _hmInvLandGrid;
+    _tlFrame.landGrid[1] = (_heightmapValid && _hmInvLandGrid > 0) ? _hmInvGrid / _hmInvLandGrid : 0.0f;
     world._41 -= static_cast<float>(camPos.X());
     world._42 -= static_cast<float>(camPos.Y());
     world._43 -= static_cast<float>(camPos.Z());
@@ -1184,6 +1190,24 @@ void EngineMTL::UploadLocalLights(const LightList& aLights)
     }
     table.count[0] = static_cast<float>(n);
     _bootstrap.UploadLocalLightTable(table);
+}
+
+void EngineMTL::SetTerrainHeightmap(const float* heights, int width, int height, float invGrid, float invLandGrid)
+{
+    if (!_bootstrap.SetTerrainHeightmap(heights, width, height))
+        return;
+    _heightmapValid = true;
+    _hmInvGrid = invGrid;
+    _hmInvLandGrid = invLandGrid;
+}
+
+void EngineMTL::SetLandClipParams(float mode, Vector3Par boundingCenter)
+{
+    _tlObject.landClip[3] = mode;
+    const bool active = mode > 0.5f;
+    _tlObject.landClip[0] = active ? static_cast<float>(boundingCenter.X()) : 0.0f;
+    _tlObject.landClip[1] = active ? static_cast<float>(boundingCenter.Y()) : 0.0f;
+    _tlObject.landClip[2] = active ? static_cast<float>(boundingCenter.Z()) : 0.0f;
 }
 
 bool EngineMTL::InstancedRunAdd(const Matrix4& modelToWorld, const LightList& lights)

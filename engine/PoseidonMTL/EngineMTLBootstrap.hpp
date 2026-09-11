@@ -35,15 +35,20 @@ struct Vertex2DMTL
     float u1, v1, pad0, pad1;
 };
 
-// 3D mesh vertex for the hardware T&L path -- same 32-byte layout as GL33's
-// SVertex (pos, negated normal, UV), local/object space (GPU does the
+// 3D mesh vertex for the hardware T&L path -- GL33's SVertex fields (pos,
+// negated normal, UV, land-clip class), local/object space (GPU does the
 // transform, unlike the 2D/legacy-TL paths where the CPU pre-transforms).
+// landClip: 0 rigid, 1 ClipLandKeep, 2 ClipLandOn. Padded to 40 bytes so the
+// MSL struct (float2 uv is 8-byte aligned) has the same stride.
 struct VertexMeshMTL
 {
     float px, py, pz;
     float nx, ny, nz;
     float u, v;
+    uint32_t landClip;
+    uint32_t pad;
 };
+static_assert(sizeof(VertexMeshMTL) == 40, "VertexMeshMTL stride must match MSL VertexMesh");
 
 // Row-major 4x4, same memory layout as Poseidon's GfxMatrix (v' = v * M,
 // translation in row 3 / m[12..15]). Passed to MSL as raw floats and
@@ -71,11 +76,17 @@ struct FrameConstantsMTL
     // GL33's rgbEyeCoef: rgb = luminance weights, a = 1 - nightEye. Day is
     // {0,0,0,1}, which leaves colour untouched.
     float nightEyeCoef[4];
+    // GPU land clip (GL33's hmParams0/landGrid): {invGrid, camX, camZ, camY}
+    // -- the absolute camera position lets the VS recover absolute XZ from
+    // the camera-relative world position -- and {invLandGrid, heightmap
+    // texels per land square, 0, 0}.
+    float hmParams[4];
+    float landGrid[4];
 };
 
 static_assert(offsetof(FrameConstantsMTL, waterSunDirAndTime) == 176,
               "FrameConstantsMTL water slot offset must match MSL");
-static_assert(sizeof(FrameConstantsMTL) == 208, "FrameConstantsMTL size must match MSL FrameConstants");
+static_assert(sizeof(FrameConstantsMTL) == 240, "FrameConstantsMTL size must match MSL FrameConstants");
 
 // One local point/spot light, matching GL33's per-light VSConstants layout
 // (EngineGL33.hpp's SlotLightPos/Diffuse/Ambient/Dir, EngineGL33_Shaders.cpp's
@@ -134,6 +145,9 @@ struct ObjectConstantsMTL
     // path pre-multiplies on the CPU into `lights`.
     float matDiffuseRaw[4];
     float matAmbientRaw[4];
+    // GL33's hmParams1: {boundingCenter.xyz, land-clip mode} for the next
+    // draw (Engine::SetLandClipParams); mode 0 leaves the vertices alone.
+    float landClip[4];
 };
 
 // One instance of an instanced run: camera-relative world matrix plus the
@@ -491,6 +505,9 @@ class EngineMTLBootstrap
     // both uploads are valid until EndFrame. While `count` > 1 every
     // DrawSectionTL draws that many instances; EndInstancedRun() drops back
     // to scalar draws.
+    // Terrain height grid as an R32 texture the mesh vertex stage samples for
+    // land clipping; the frame's hmParams/landGrid carry the grid scales.
+    bool SetTerrainHeightmap(const float* heights, int width, int height);
     void UploadLocalLightTable(const LocalLightTableMTL& table);
     void UploadInstances(const InstanceMTL* instances, int count);
     void EndInstancedRun();

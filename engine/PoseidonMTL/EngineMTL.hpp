@@ -221,6 +221,14 @@ class EngineMTL : public Engine
     }
     bool InstancedRunActive() const override { return _instCount > 1; }
 
+    // GPU land clip -- GL33's design: the terrain height grid lives in a
+    // vertex-stage texture and vsMesh snaps ClipLandKeep/ClipLandOn vertices
+    // to it, so the CPU deform is skipped (Object::SkipCpuLandClip) and
+    // land-clipped shapes can instance.
+    void SetTerrainHeightmap(const float* heights, int width, int height, float invGrid, float invLandGrid) override;
+    bool LandClipInVS() const override { return _heightmapValid; }
+    void SetLandClipParams(float mode, Vector3Par boundingCenter) override;
+
     // No BeginShadowPass/EndShadowPass override: GL33's versions only flush
     // its batched-draw queue (EngineGL33_Draw.cpp). Metal's queued 2D draws
     // are drained by FlushQueues()/state-changing draw boundaries.
@@ -403,6 +411,9 @@ class EngineMTL : public Engine
     bool _sunEnabled = false;
     float _grassParams[4] = {};
 
+    bool _heightmapValid = false;
+    float _hmInvGrid = 0.0f;
+    float _hmInvLandGrid = 0.0f;
     InstanceMTL _instArray[kMaxInstancesMTL] = {};
     int _instPending = 0;
     int _instCount = 0;
