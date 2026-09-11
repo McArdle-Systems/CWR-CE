@@ -238,6 +238,8 @@ void EngineMTL::InitDraw(bool clear, PackedColor color)
 
     Engine::InitDraw(clear, color);
     _frameOpen = true;
+    _drawItems.clear();
+    _currentDrawItem = DrawItem{};
 }
 
 void EngineMTL::FinishDraw()
@@ -654,6 +656,7 @@ void EngineMTL::PrepareTriangle(const MipInfo& mip, int specFlags)
     _currentTriDetailMode = 0.0f;
 
     const render::LegacySpec spec = render::SplitLegacy(specFlags);
+    _currentTriSpec = spec;
     render::BuildContext ctx;
     ctx.isIn3DPass = false;
     ctx.isMultitexturing = IsMultitexturing();
@@ -1059,6 +1062,10 @@ void EngineMTL::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelT
     world._42 -= static_cast<float>(camPos.Y());
     world._43 -= static_cast<float>(camPos.Z());
     std::memcpy(_tlObject.world.m, &world, sizeof(world));
+
+    _currentDrawItem.worldMatrix = world;
+    _currentDrawItem.specFlags = spec;
+    _currentDrawItem.bias = _bias;
 }
 
 void EngineMTL::BeginMeshTL(const Shape& sMesh, int /*spec*/, bool dynamic)
@@ -1079,6 +1086,19 @@ void EngineMTL::DrawSectionTL(const Shape& sMesh, int beg, int end)
     _bootstrap.DrawSectionTL(buf->VertexBufferHandle(), buf->IndexBufferHandle(), firstIndex, indexCount,
                              _tlCurrentTexture, _tlSecondaryTexture, _tlObject, _tlFrame, _tlSectionDepthMode,
                              _tlSectionBlendMode, _tlSectionSampler, _tlSectionSurfaceMode, _tlSectionShader);
+
+    DrawItem item = _currentDrawItem;
+    item.isTLDraw = true;
+    item.sectionBegin = beg;
+    item.sectionEnd = end;
+    item.firstIndex = firstIndex;
+    item.indexCount = indexCount;
+    item.vertexBuffer = buf;
+    item.backendMeshHandle = static_cast<std::uint32_t>(buf->VertexBufferHandle());
+    item.backendTextureHandle = static_cast<std::uint32_t>(_tlCurrentTexture);
+    item.backendTexture1Handle = static_cast<std::uint32_t>(_tlSecondaryTexture);
+    item.passId = SpecToPassId(item.specFlags);
+    _drawItems.push_back(item);
 }
 
 void EngineMTL::FlushQueues()
@@ -1089,6 +1109,12 @@ void EngineMTL::FlushQueues()
 void EngineMTL::DrawPolygon(const VertexIndex* i, int n)
 {
     DrawIndexedFan3D(i, n);
+
+    DrawItem item = {};
+    item.isTLDraw = false;
+    item.specFlags = _currentTriSpec;
+    item.passId = SpecToPassId(_currentTriSpec);
+    _drawItems.push_back(item);
 }
 
 void EngineMTL::DrawSection(const FaceArray& face, Offset beg, Offset end)

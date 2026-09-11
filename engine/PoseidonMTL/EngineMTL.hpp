@@ -228,6 +228,7 @@ class EngineMTL : public Engine
     bool GetDebugFlatColor() const override { return _debugFlatColor; }
     unsigned int GetDebugErrorCount() const override { return _bootstrap.DebugErrorCount(); }
     std::string GetLastDebugMessage() const override { return _bootstrap.LastDebugMessage(); }
+    const std::vector<DrawItem>* GetRecordedDraws() const override { return &_drawItems; }
 
   private:
     static constexpr int kGuardBand = 1024 * 4;
@@ -254,6 +255,12 @@ class EngineMTL : public Engine
     int _lastFrameWidth = 0;
     int _lastFrameHeight = 0;
     bool _debugFlatColor = false;
+
+    // Per-frame draw recording for the frame validator (SceneExtractor);
+    // same shape GL33 records. Cleared in InitDraw.
+    std::vector<DrawItem> _drawItems;
+    DrawItem _currentDrawItem;
+    render::LegacySpec _currentTriSpec;
 
     // Presents the bootstrap frame (with readback when enabled). NextFrame's
     // normal path; the Trident samplers also call it so a frame that has
