@@ -42,7 +42,7 @@ TEST_CASE("Metal cutouts preserve coverage without transparent depth writes", "[
     REQUIRE(legacyPrepareRegion.find("if (d.blend == render::BlendMode::AlphaBlend)") != std::string::npos);
     REQUIRE(legacyPrepareRegion.find("_currentTriDepthMode = render::DepthMode::ReadOnly;") != std::string::npos);
     REQUIRE(legacyPrepareRegion.find("mip._texture->IsTransparent()") != std::string::npos);
-    REQUIRE(legacyPrepareRegion.find("!_legacyMeshUiOverlay && mip.IsOK()") != std::string::npos);
+    REQUIRE(legacyPrepareRegion.find("!_legacyMeshUiOverlay && !screenSpaceOverlay && mip.IsOK()") != std::string::npos);
     REQUIRE(legacyPrepareRegion.find("_currentTriAlphaRef = 254;") != std::string::npos);
 
     const std::string bootstrap = ReadTextFile(repoRoot / "engine" / "PoseidonMTL" / "EngineMTLBootstrap.cpp");
@@ -84,7 +84,7 @@ TEST_CASE("Metal cutouts preserve coverage without transparent depth writes", "[
         REQUIRE(bootstrap.find("diffuseLit * (detail.a * 2.0) + specLit") != std::string::npos);
         REQUIRE(bootstrap.find("obj.flags.w * saturate((obj.flags.z * 2.0 - 1.0) + grass.a) * 2.0") !=
                 std::string::npos);
-        REQUIRE(bootstrap.find("setFragmentBytes(&obj, sizeof(obj), 1)") != std::string::npos);
+        REQUIRE(bootstrap.find("setFragmentBytes(&objDraw, sizeof(objDraw), 1)") != std::string::npos);
         REQUIRE(prepareRegion.find("GetWaterBumpMap()") != std::string::npos);
         REQUIRE(prepareRegion.find("if (!isDetailTagged && _tlSecondaryTexture != 0)") != std::string::npos);
     }
