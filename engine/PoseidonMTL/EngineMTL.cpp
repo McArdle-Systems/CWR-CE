@@ -1117,6 +1117,59 @@ void EngineMTL::DrawPolygon(const VertexIndex* i, int n)
     _drawItems.push_back(item);
 }
 
+// Stars and laser-target dots: each screen-space point becomes a 2x2 quad
+// whose corner alphas carry the sub-pixel position, same as GL33's
+// DrawPoints. Points are never fogged (specular 0xff000000 = full vFogTC).
+void EngineMTL::DrawPoints(int beg, int end)
+{
+    if (_mesh == nullptr)
+        return;
+
+    const Rect2DAbs fullScreen(0, 0, static_cast<float>(_w), static_cast<float>(_h));
+    for (int i = beg; i < end; i++)
+    {
+        if (_mesh->Clip(i) & ClipAll)
+            continue;
+        const TLVertex& v = _mesh->GetVertex(i);
+        const PackedColor color = v.color;
+        if (color.A8() < 8)
+            continue;
+
+        const int xI = toIntFloor(v.pos[0]);
+        const int yI = toIntFloor(v.pos[1]);
+        if (xI < 0 || xI + 2 > _w || yI < 0 || yI + 2 > _h)
+            continue;
+        const float xFrac = v.pos[0] - xI;
+        const float yFrac = v.pos[1] - yI;
+        const float a = color.A8();
+        auto fracAlpha = [](float alpha)
+        {
+            int ia = toInt(alpha);
+            saturate(ia, 0, 255);
+            return ia;
+        };
+
+        const float x0 = xI + 0.5f, x1 = xI + 2.5f;
+        const float y0 = yI + 0.5f, y1 = yI + 2.5f;
+        const float xy[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
+        const float z[4] = {v.pos.Z(), v.pos.Z(), v.pos.Z(), v.pos.Z()};
+        const float rhw[4] = {v.rhw, v.rhw, v.rhw, v.rhw};
+        const float uv[8] = {v.t0.u, v.t0.v, v.t0.u, v.t0.v, v.t0.u, v.t0.v, v.t0.u, v.t0.v};
+        const PackedColor colors[4] = {
+            PackedColorRGB(color, fracAlpha((1 - xFrac) * (1 - yFrac) * a)),
+            PackedColorRGB(color, fracAlpha(xFrac * (1 - yFrac) * a)),
+            PackedColorRGB(color, fracAlpha(xFrac * yFrac * a)),
+            PackedColorRGB(color, fracAlpha((1 - xFrac) * yFrac * a)),
+        };
+        const PackedColor noFog(0xff000000);
+        const PackedColor specular[4] = {noFog, noFog, noFog, noFog};
+
+        DrawFan2D(xy, z, rhw, uv, nullptr, colors, 4, _currentTriTexture, _currentTriSecondaryTexture, fullScreen,
+                  _currentTriDepthMode, _currentTriBlendMode, _currentTriSampler, _currentTriSurfaceMode,
+                  _currentTriShader, _currentTriAlphaMode, _currentTriAlphaRef, specular, _currentTriDetailMode);
+    }
+}
+
 void EngineMTL::DrawSection(const FaceArray& face, Offset beg, Offset end)
 {
     for (Offset i = beg; i < end; face.Next(i))

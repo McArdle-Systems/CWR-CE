@@ -134,6 +134,7 @@ class EngineMTL : public Engine
 
     void PrepareTriangle(const MipInfo& mip, int specFlags) override;
     void DrawPolygon(const VertexIndex* i, int n) override;
+    void DrawPoints(int beg, int end) override;
     void DrawSection(const FaceArray& face, Offset beg, Offset end) override;
     void DrawDecal(Vector3Par pos, float rhw, float sizeX, float sizeY, PackedColor col, const MipInfo& mip,
                    int specFlags) override;
