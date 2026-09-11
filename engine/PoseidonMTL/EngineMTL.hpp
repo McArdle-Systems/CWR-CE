@@ -104,6 +104,14 @@ class EngineMTL : public Engine
 
     void ListResolutions(FindArray<ResolutionInfo>& ret) override;
     void ListRefreshRates(FindArray<int>& ret) override;
+    WindowMode GetCurrentWindowMode() const override;
+    void ListMonitors(FindArray<MonitorInfo>& ret) override;
+    int GetCurrentMonitor() const override;
+    bool SwitchMonitor(int idx) override;
+    bool GetDesktopDisplayMode(int& w, int& h, int& refresh) const override;
+    bool GetCurrentDisplayMode(int& w, int& h, int& refresh) const override;
+    bool GetRequestedFullscreenMode(int& w, int& h, int& refresh) const override;
+    bool IsAbleToDraw() override { return _sdlWindow != nullptr; }
 
     void SetGamma(float g) override { _gamma = g; }
     float GetGamma() const override { return _gamma; }
@@ -175,6 +183,18 @@ class EngineMTL : public Engine
     // draw that could reference a texture this releases.
     void ResetForRemount() override;
 
+    // Same guard band as GL33: Metal clips in NDC too, so a modest overflow
+    // past the viewport is safe and spares the CPU clipper edge-straddling
+    // geometry.
+    int MinGuardX() const override { return -kGuardBand; }
+    int MaxGuardX() const override { return _w + kGuardBand; }
+    int MinGuardY() const override { return -kGuardBand; }
+    int MaxGuardY() const override { return _h + kGuardBand; }
+    int MinSatX() const override { return MinGuardX(); }
+    int MaxSatX() const override { return MaxGuardX(); }
+    int MinSatY() const override { return MinGuardY(); }
+    int MaxSatY() const override { return MaxGuardY(); }
+
     float ZShadowEpsilon() const override { return 0.01f; }
     float ZRoadEpsilon() const override { return 0.005f; }
     float ObjMipmapCoef() const override { return 1.5f; }
@@ -205,6 +225,8 @@ class EngineMTL : public Engine
     bool SamplePixel(int x, int y, uint8_t* outRGB) override;
 
   private:
+    static constexpr int kGuardBand = 1024 * 4;
+
     int _w = 0, _h = 0; // backbuffer dimensions (pixels)
     int _pixelSize;
     int _refreshRate;

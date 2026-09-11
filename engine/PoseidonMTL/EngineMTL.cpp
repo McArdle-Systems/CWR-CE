@@ -37,6 +37,16 @@ int GpuHandleOf(Texture* tex)
     TextureMTL* mtlTex = dynamic_cast<TextureMTL*>(tex);
     return mtlTex ? mtlTex->GpuHandle() : 0;
 }
+
+bool ReadDisplayMode(const SDL_DisplayMode* mode, int& w, int& h, int& refresh)
+{
+    if (!mode)
+        return false;
+    w = mode->w;
+    h = mode->h;
+    refresh = (int)(mode->refresh_rate + 0.5f);
+    return true;
+}
 } // namespace
 
 EngineMTL::EngineMTL(int width, int height, bool windowed, int bpp)
@@ -1077,8 +1087,15 @@ bool EngineMTL::SetWindowMode(WindowMode mode)
     SDL_SetWindowBordered(_sdlWindow, mode == WindowMode::Windowed);
     _windowed = (mode == WindowMode::Windowed);
 
-    if (mode == WindowMode::Windowed && _windowedRestoreW > 0)
-        SDL_SetWindowSize(_sdlWindow, _windowedRestoreW, _windowedRestoreH);
+    if (mode == WindowMode::Windowed)
+    {
+        // A window created fullscreen/borderless never had SDL_WINDOW_RESIZABLE,
+        // and SDL_SetWindowBordered does not add it.
+        SDL_SetWindowResizable(_sdlWindow, true);
+        if (_windowedRestoreW > 0)
+            SDL_SetWindowSize(_sdlWindow, _windowedRestoreW, _windowedRestoreH);
+        SDL_SetWindowPosition(_sdlWindow, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
 
     int cw = 0, ch = 0;
     SDL_GetWindowSizeInPixels(_sdlWindow, &cw, &ch);
@@ -1136,6 +1153,106 @@ RString EngineMTL::GetDebugName() const
 RString EngineMTL::GetRendererName() const
 {
     return "Metal";
+}
+
+WindowMode EngineMTL::GetCurrentWindowMode() const
+{
+    if (!_sdlWindow)
+        return WindowMode::Windowed;
+    return _windowMode;
+}
+
+void EngineMTL::ListMonitors(FindArray<MonitorInfo>& ret)
+{
+    ret.Clear();
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    if (!displays)
+        return;
+    for (int i = 0; i < count; ++i)
+    {
+        const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(displays[i]);
+        const char* name = SDL_GetDisplayName(displays[i]);
+        MonitorInfo info;
+        info.index = i;
+        info.name = name ? name : "Unknown";
+        info.w = mode ? mode->w : 0;
+        info.h = mode ? mode->h : 0;
+        info.refresh = mode ? (int)(mode->refresh_rate + 0.5f) : 0;
+        ret.Add(info);
+    }
+    SDL_free(displays);
+}
+
+int EngineMTL::GetCurrentMonitor() const
+{
+    if (!_sdlWindow)
+        return 0;
+    SDL_DisplayID id = SDL_GetDisplayForWindow(_sdlWindow);
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    int idx = 0;
+    if (displays)
+    {
+        for (int i = 0; i < count; ++i)
+            if (displays[i] == id)
+            {
+                idx = i;
+                break;
+            }
+        SDL_free(displays);
+    }
+    return idx;
+}
+
+bool EngineMTL::SwitchMonitor(int idx)
+{
+    if (!_sdlWindow)
+        return false;
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    if (!displays || idx < 0 || idx >= count)
+    {
+        SDL_free(displays);
+        return false;
+    }
+    SDL_DisplayID target = displays[idx];
+    SDL_free(displays);
+    SDL_Rect bounds;
+    if (!SDL_GetDisplayBounds(target, &bounds))
+        return false;
+    int windowW = _w;
+    int windowH = _h;
+    SDL_GetWindowSize(_sdlWindow, &windowW, &windowH);
+    SDL_SetWindowPosition(_sdlWindow, bounds.x + (bounds.w - windowW) / 2, bounds.y + (bounds.h - windowH) / 2);
+    return true;
+}
+
+bool EngineMTL::GetDesktopDisplayMode(int& w, int& h, int& refresh) const
+{
+    if (!_sdlWindow)
+        return false;
+    SDL_DisplayID display = SDL_GetDisplayForWindow(_sdlWindow);
+    if (!display)
+        display = SDL_GetPrimaryDisplay();
+    return ReadDisplayMode(SDL_GetDesktopDisplayMode(display), w, h, refresh);
+}
+
+bool EngineMTL::GetCurrentDisplayMode(int& w, int& h, int& refresh) const
+{
+    if (!_sdlWindow)
+        return false;
+    SDL_DisplayID display = SDL_GetDisplayForWindow(_sdlWindow);
+    if (!display)
+        display = SDL_GetPrimaryDisplay();
+    return ReadDisplayMode(SDL_GetCurrentDisplayMode(display), w, h, refresh);
+}
+
+bool EngineMTL::GetRequestedFullscreenMode(int& w, int& h, int& refresh) const
+{
+    if (!_sdlWindow)
+        return false;
+    return ReadDisplayMode(SDL_GetWindowFullscreenMode(_sdlWindow), w, h, refresh);
 }
 
 void EngineMTL::ListResolutions(FindArray<ResolutionInfo>& ret)

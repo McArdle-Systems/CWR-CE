@@ -53,6 +53,9 @@ class TextBankMTL : public AbstractTextBank
     void Compact() override { _texture.Compact(); }
     void Preload() override {}
     void FlushTextures() override { Compact(); }
+    // TODO: GL33 drops every texture that belongs to the bank being unloaded
+    // (mod unload from OptionsUI); this leaves them cached under their old
+    // names. Same live-texture problem as EngineMTL::ResetForRemount.
     void FlushBank(QFBank* /*bank*/) override {}
     // Wipes every texture at once (level unload etc.) -- the budget total
     // and LRU list would otherwise go stale (individual TextureMTL
