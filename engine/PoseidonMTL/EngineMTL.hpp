@@ -113,8 +113,24 @@ class EngineMTL : public Engine
     bool GetRequestedFullscreenMode(int& w, int& h, int& refresh) const override;
     bool IsAbleToDraw() override { return _sdlWindow != nullptr; }
 
-    void SetGamma(float g) override { _gamma = g; }
+    void SetGamma(float g) override
+    {
+        _gamma = g;
+        _bootstrap.SetGamma(g);
+    }
     float GetGamma() const override { return _gamma; }
+    // -1 (adaptive) has no Metal equivalent; treat it as on.
+    bool SetSwapInterval(int interval) override { return _bootstrap.SetVSync(interval != 0); }
+    int GetSwapInterval() const override { return _bootstrap.VSync() ? 1 : 0; }
+    void SetMsaaSamples(int samples) override { _bootstrap.SetMsaaSamples(samples); }
+    int GetMsaaSamples() const override { return _bootstrap.MsaaSamples(); }
+    void SetRenderScale(float scale) override { _bootstrap.SetRenderScale(scale); }
+    float GetRenderScale() const override { return _bootstrap.RenderScale(); }
+    // TODO: stored only. Coverage-from-alpha needs the cutout fragment
+    // shaders to emit sharpened coverage in alpha instead of discarding
+    // (GL33's PSAlphaToCoverage path); until then MSAA edges on cutouts
+    // come from the discard threshold alone.
+    void SetAlphaToCoverage(bool enable) override { _alphaToCoverage = enable; }
 
     void PrepareTriangle(const MipInfo& mip, int specFlags) override;
     void DrawPolygon(const VertexIndex* i, int n) override;
@@ -239,6 +255,7 @@ class EngineMTL : public Engine
     bool _windowed;
     int _bias = 0;
     float _gamma = 1.0f;
+    bool _alphaToCoverage = false;
     WindowMode _windowMode = WindowMode::Borderless;
     int _windowedRestoreW = 0, _windowedRestoreH = 0;
 

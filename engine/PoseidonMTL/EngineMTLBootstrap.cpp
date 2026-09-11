@@ -127,6 +127,34 @@ fragment float4 fs2dShadow(VSOut in [[stage_in]], texture2d<float> tex [[texture
 }
 )";
 
+// Present pass: fullscreen triangle sampling the offscreen frame target into
+// the drawable, applying GL33's pow(c, 1/gamma) on the way (its psGamma).
+const char* kShaderSourcePresent = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutPresent {
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex VSOutPresent vsPresent(uint vid [[vertex_id]])
+{
+    const float2 pos = float2((vid == 1) ? 3.0 : -1.0, (vid == 2) ? 3.0 : -1.0);
+    VSOutPresent out;
+    out.position = float4(pos, 0.0, 1.0);
+    out.uv = float2((pos.x + 1.0) * 0.5, 1.0 - (pos.y + 1.0) * 0.5);
+    return out;
+}
+
+fragment float4 fsPresent(VSOutPresent in [[stage_in]], texture2d<float> frame [[texture(0)]],
+                          sampler samp [[sampler(0)]], constant float& invGamma [[buffer(0)]])
+{
+    float4 c = frame.sample(samp, in.uv);
+    return float4(pow(max(c.rgb, 0.0), invGamma), 1.0);
+}
+)";
+
 // Hardware T&L mesh shader: GPU does the model->view->projection transform
 // (unlike the 2D/legacy-TL paths, where the CPU pre-transforms to screen
 // space). Per-vertex (Gouraud) lighting -- sun diffuse+ambient+emissive only
@@ -775,6 +803,22 @@ struct EngineMTLBootstrap::Impl
     int drawableWidth = 0;
     int drawableHeight = 0;
 
+    // Offscreen frame target (see SetMsaaSamples/SetRenderScale/SetGamma).
+    int msaaSamples = 0;
+    int pendingMsaaSamples = 0;
+    float renderScale = 1.0f;
+    float pendingRenderScale = 1.0f;
+    float gamma = 1.0f;
+    int frameSampleCount = 1; // what the render pipelines were built for
+    int frameWidth = 0;       // == drawable size unless render scale is on
+    int frameHeight = 0;
+    MTL::Texture* frameColor = nullptr;   // single-sample, shader-readable
+    MTL::Texture* frameColorMS = nullptr; // frameSampleCount > 1 only; resolves into frameColor
+    MTL::RenderPipelineState* presentPipeline = nullptr;
+    MTL::SamplerState* presentSampler = nullptr;
+    bool resolvedThisFrame = false;
+    bool vsync = true;
+
     // Two-generation deferred-destroy queue for mesh buffers -- see
     // DestroyMeshBufferDeferred's doc comment. EndFrame() destroys
     // whatever's in the OTHER generation (queued during the frame before
@@ -977,7 +1021,6 @@ void EngineMTLBootstrap::ApplyDrawableSize(int fallbackWidth, int fallbackHeight
     _impl->drawableWidth = size.width;
     _impl->drawableHeight = size.height;
     _impl->layer->setDrawableSize(CGSizeMake(static_cast<CGFloat>(size.width), static_cast<CGFloat>(size.height)));
-    EnsureDepthTarget(size.width, size.height);
 
     if (size.safeAreaAdjusted)
     {
@@ -989,12 +1032,13 @@ void EngineMTLBootstrap::ApplyDrawableSize(int fallbackWidth, int fallbackHeight
     }
 }
 
-void EngineMTLBootstrap::EnsureDepthTarget(int width, int height)
+void EngineMTLBootstrap::EnsureDepthTarget(int width, int height, int sampleCount)
 {
     if (_impl->device == nullptr || width <= 0 || height <= 0)
         return;
     if (_impl->depthTexture != nullptr && static_cast<int>(_impl->depthTexture->width()) == width &&
-        static_cast<int>(_impl->depthTexture->height()) == height)
+        static_cast<int>(_impl->depthTexture->height()) == height &&
+        static_cast<int>(_impl->depthTexture->sampleCount()) == sampleCount)
         return;
 
     if (_impl->depthTexture != nullptr)
@@ -1011,8 +1055,225 @@ void EngineMTLBootstrap::EnsureDepthTarget(int width, int height)
         false);
     desc->setUsage(MTL::TextureUsageRenderTarget);
     desc->setStorageMode(MTL::StorageModePrivate);
+    if (sampleCount > 1)
+    {
+        desc->setTextureType(MTL::TextureType2DMultisample);
+        desc->setSampleCount(static_cast<NS::UInteger>(sampleCount));
+    }
     _impl->depthTexture = _impl->device->newTexture(desc);
     desc->release();
+}
+
+void EngineMTLBootstrap::SetMsaaSamples(int samples)
+{
+    if (samples >= 8)
+        samples = 8;
+    else if (samples >= 4)
+        samples = 4;
+    else if (samples >= 2)
+        samples = 2;
+    else
+        samples = 0;
+    _impl->pendingMsaaSamples = samples;
+}
+
+int EngineMTLBootstrap::MsaaSamples() const
+{
+    return _impl->msaaSamples;
+}
+
+void EngineMTLBootstrap::SetRenderScale(float scale)
+{
+    if (scale < 1.0f)
+        scale = 1.0f;
+    if (scale > 2.0f)
+        scale = 2.0f;
+    _impl->pendingRenderScale = scale;
+}
+
+float EngineMTLBootstrap::RenderScale() const
+{
+    return _impl->renderScale;
+}
+
+void EngineMTLBootstrap::SetGamma(float gamma)
+{
+    _impl->gamma = gamma > 0.0f ? gamma : 1.0f;
+}
+
+bool EngineMTLBootstrap::SetVSync(bool enabled)
+{
+    if (_impl->layer == nullptr)
+        return false;
+    _impl->layer->setDisplaySyncEnabled(enabled);
+    _impl->vsync = enabled;
+    return true;
+}
+
+bool EngineMTLBootstrap::VSync() const
+{
+    return _impl->vsync;
+}
+
+bool EngineMTLBootstrap::OffscreenActive() const
+{
+    return _impl->frameSampleCount > 1 || _impl->renderScale > 1.001f || _impl->gamma < 0.999f || _impl->gamma > 1.001f;
+}
+
+void EngineMTLBootstrap::ApplyPendingFrameTarget()
+{
+    int sampleCount = _impl->pendingMsaaSamples > 1 ? _impl->pendingMsaaSamples : 1;
+    while (sampleCount > 1 && !_impl->device->supportsTextureSampleCount(static_cast<NS::UInteger>(sampleCount)))
+        sampleCount /= 2;
+    if (sampleCount != _impl->frameSampleCount)
+    {
+        ReleaseRenderPipelines();
+        _impl->frameSampleCount = sampleCount;
+    }
+    _impl->msaaSamples = sampleCount > 1 ? sampleCount : 0;
+    _impl->renderScale = _impl->pendingRenderScale;
+
+    const bool offscreen = OffscreenActive();
+    _impl->frameWidth =
+        offscreen ? static_cast<int>(_impl->drawableWidth * _impl->renderScale + 0.5f) : _impl->drawableWidth;
+    _impl->frameHeight =
+        offscreen ? static_cast<int>(_impl->drawableHeight * _impl->renderScale + 0.5f) : _impl->drawableHeight;
+    if (offscreen)
+        EnsureFrameTarget(_impl->frameWidth, _impl->frameHeight);
+    else
+        ReleaseFrameTarget();
+    EnsureDepthTarget(_impl->frameWidth, _impl->frameHeight, _impl->frameSampleCount);
+}
+
+void EngineMTLBootstrap::EnsureFrameTarget(int width, int height)
+{
+    const bool wantMS = _impl->frameSampleCount > 1;
+    if (_impl->frameColor != nullptr && static_cast<int>(_impl->frameColor->width()) == width &&
+        static_cast<int>(_impl->frameColor->height()) == height && (_impl->frameColorMS != nullptr) == wantMS &&
+        (!wantMS || static_cast<int>(_impl->frameColorMS->sampleCount()) == _impl->frameSampleCount))
+        return;
+    ReleaseFrameTarget();
+
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::texture2DDescriptor(
+        MTL::PixelFormatBGRA8Unorm, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height), false);
+    desc->setStorageMode(MTL::StorageModePrivate);
+    desc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    _impl->frameColor = _impl->device->newTexture(desc);
+    if (wantMS)
+    {
+        desc->setUsage(MTL::TextureUsageRenderTarget);
+        desc->setTextureType(MTL::TextureType2DMultisample);
+        desc->setSampleCount(static_cast<NS::UInteger>(_impl->frameSampleCount));
+        _impl->frameColorMS = _impl->device->newTexture(desc);
+    }
+    desc->release();
+    LOG_INFO(Graphics, "MTL: frame target {}x{} msaa={} scale={} gamma={}", width, height, _impl->msaaSamples,
+             _impl->renderScale, _impl->gamma);
+}
+
+void EngineMTLBootstrap::ReleaseFrameTarget()
+{
+    if (_impl->frameColor != nullptr)
+    {
+        _impl->frameColor->release();
+        _impl->frameColor = nullptr;
+    }
+    if (_impl->frameColorMS != nullptr)
+    {
+        _impl->frameColorMS->release();
+        _impl->frameColorMS = nullptr;
+    }
+}
+
+void EngineMTLBootstrap::ReleaseRenderPipelines()
+{
+    MTL::RenderPipelineState** states[] = {&_impl->pipelineState,         &_impl->pipelineState2DAdditive,
+                                           &_impl->pipelineState2DShadow, &_impl->pipelineStateTL,
+                                           &_impl->pipelineStateTLBlend,  &_impl->pipelineStateTLAdditive,
+                                           &_impl->pipelineStateTLShadow};
+    for (MTL::RenderPipelineState** state : states)
+    {
+        if (*state != nullptr)
+        {
+            (*state)->release();
+            *state = nullptr;
+        }
+    }
+}
+
+void EngineMTLBootstrap::EnsurePresentPipeline()
+{
+    if (_impl->presentPipeline != nullptr || _impl->device == nullptr)
+        return;
+
+    NS::Error* error = nullptr;
+    NS::String* src = NS::String::string(kShaderSourcePresent, NS::StringEncoding::UTF8StringEncoding);
+    MTL::Library* library = _impl->device->newLibrary(src, nullptr, &error);
+    if (library == nullptr)
+    {
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: present shader compile failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+        return;
+    }
+    MTL::Function* vsFn = library->newFunction(NS::String::string("vsPresent", NS::StringEncoding::UTF8StringEncoding));
+    MTL::Function* fsFn = library->newFunction(NS::String::string("fsPresent", NS::StringEncoding::UTF8StringEncoding));
+
+    MTL::RenderPipelineDescriptor* desc = MTL::RenderPipelineDescriptor::alloc()->init();
+    desc->setVertexFunction(vsFn);
+    desc->setFragmentFunction(fsFn);
+    desc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    _impl->presentPipeline = _impl->device->newRenderPipelineState(desc, &error);
+    if (_impl->presentPipeline == nullptr)
+    {
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: present pipeline state creation failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+    }
+    desc->release();
+    vsFn->release();
+    fsFn->release();
+    library->release();
+
+    MTL::SamplerDescriptor* sampDesc = MTL::SamplerDescriptor::alloc()->init();
+    sampDesc->setMinFilter(MTL::SamplerMinMagFilterLinear);
+    sampDesc->setMagFilter(MTL::SamplerMinMagFilterLinear);
+    sampDesc->setSAddressMode(MTL::SamplerAddressModeClampToEdge);
+    sampDesc->setTAddressMode(MTL::SamplerAddressModeClampToEdge);
+    _impl->presentSampler = _impl->device->newSamplerState(sampDesc);
+    sampDesc->release();
+}
+
+void EngineMTLBootstrap::ResolveToDrawable()
+{
+    if (_impl->currentEncoder == nullptr || _impl->resolvedThisFrame)
+        return;
+    _impl->resolvedThisFrame = true;
+    EnsurePresentPipeline();
+
+    FlushTriangles2D();
+    _impl->currentEncoder->endEncoding();
+    _impl->currentEncoder->release();
+    _impl->currentEncoder = nullptr;
+
+    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+    MTL::RenderPassDescriptor* passDesc = MTL::RenderPassDescriptor::alloc()->init();
+    MTL::RenderPassColorAttachmentDescriptor* colorAttachment = passDesc->colorAttachments()->object(0);
+    colorAttachment->setTexture(_impl->currentDrawable->texture());
+    colorAttachment->setLoadAction(MTL::LoadActionDontCare);
+    colorAttachment->setStoreAction(MTL::StoreActionStore);
+    _impl->currentEncoder = _impl->currentCommandBuffer->renderCommandEncoder(passDesc);
+    _impl->currentEncoder->retain();
+    passDesc->release();
+
+    if (_impl->presentPipeline != nullptr && _impl->frameColor != nullptr)
+    {
+        const float invGamma = 1.0f / _impl->gamma;
+        _impl->currentEncoder->setRenderPipelineState(_impl->presentPipeline);
+        _impl->currentEncoder->setFragmentTexture(_impl->frameColor, 0);
+        _impl->currentEncoder->setFragmentSamplerState(_impl->presentSampler, 0);
+        _impl->currentEncoder->setFragmentBytes(&invGamma, sizeof(invGamma), 0);
+        _impl->currentEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+    }
+    pool->release();
 }
 
 std::string EngineMTLBootstrap::GetRendererName() const
@@ -1032,13 +1293,17 @@ void EngineMTLBootstrap::BeginDebugOverlayFrame()
     if (_impl->currentDrawable == nullptr)
         return;
 
+    // ImGui derives its pipeline from this descriptor, so it has to match the
+    // pass the overlay is drawn in: the present pass (drawable, no depth)
+    // when the frame goes through the offscreen target, the shared frame
+    // pass otherwise.
     MTL::RenderPassDescriptor* passDesc = MTL::RenderPassDescriptor::alloc()->init();
     MTL::RenderPassColorAttachmentDescriptor* colorAttachment = passDesc->colorAttachments()->object(0);
     colorAttachment->setTexture(_impl->currentDrawable->texture());
     colorAttachment->setLoadAction(MTL::LoadActionLoad);
     colorAttachment->setStoreAction(MTL::StoreActionStore);
 
-    if (_impl->depthTexture != nullptr)
+    if (_impl->depthTexture != nullptr && !OffscreenActive())
     {
         MTL::RenderPassDepthAttachmentDescriptor* depthAttachment = passDesc->depthAttachment();
         depthAttachment->setTexture(_impl->depthTexture);
@@ -1057,6 +1322,9 @@ void EngineMTLBootstrap::BeginDebugOverlayFrame()
 
 void EngineMTLBootstrap::RenderDebugOverlay()
 {
+    // Like GL33, the overlay goes on top of the resolved window-sized image.
+    if (OffscreenActive())
+        ResolveToDrawable();
     Poseidon::Dev::DebugOverlayMetal::Render(_impl->currentCommandBuffer, _impl->currentEncoder);
 }
 
@@ -1111,6 +1379,7 @@ void EngineMTLBootstrap::EnsurePipeline()
     // pipeline's own depth-stencil state never touches the stencil plane.
     desc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
     desc->setStencilAttachmentPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
+    desc->setSampleCount(static_cast<NS::UInteger>(_impl->frameSampleCount));
 
     _impl->pipelineState = _impl->device->newRenderPipelineState(desc, &error);
     if (_impl->pipelineState == nullptr)
@@ -1318,6 +1587,7 @@ void EngineMTLBootstrap::EnsureTLPipeline()
     colorDesc->setBlendingEnabled(false);
     desc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
     desc->setStencilAttachmentPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
+    desc->setSampleCount(static_cast<NS::UInteger>(_impl->frameSampleCount));
 
     _impl->pipelineStateTL = _impl->device->newRenderPipelineState(desc, &error);
     if (_impl->pipelineStateTL == nullptr)
@@ -1420,6 +1690,9 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
 
     _impl->frameCounter++;
 
+    // Before EnsurePipeline: a sample-count change drops the pipelines.
+    if (_impl->currentDrawable == nullptr)
+        ApplyPendingFrameTarget();
     EnsurePipeline();
     EnsureFallbackResources();
     if (_impl->pipelineState == nullptr)
@@ -1446,6 +1719,7 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
 
     if (firstPassThisFrame)
     {
+        _impl->resolvedThisFrame = false;
         // First Clear() of this displayed frame: acquire the drawable and
         // open the frame's one command buffer. This must happen exactly
         // once per frame -- nextDrawable() hands back a recycled texture
@@ -1481,7 +1755,27 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
 
     MTL::RenderPassDescriptor* passDesc = MTL::RenderPassDescriptor::alloc()->init();
     MTL::RenderPassColorAttachmentDescriptor* colorAttachment = passDesc->colorAttachments()->object(0);
-    colorAttachment->setTexture(_impl->currentDrawable->texture());
+    if (OffscreenActive() && _impl->frameColor != nullptr)
+    {
+        if (_impl->frameColorMS != nullptr)
+        {
+            // Resolve after every pass so a mid-frame Clear() can Load the
+            // multisample texture and the present pass reads a complete frame.
+            colorAttachment->setTexture(_impl->frameColorMS);
+            colorAttachment->setResolveTexture(_impl->frameColor);
+            colorAttachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+        }
+        else
+        {
+            colorAttachment->setTexture(_impl->frameColor);
+            colorAttachment->setStoreAction(MTL::StoreActionStore);
+        }
+    }
+    else
+    {
+        colorAttachment->setTexture(_impl->currentDrawable->texture());
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+    }
     // GL's Clear(false, false) or Clear(true, false) on the first draw of a
     // frame still targets the current backbuffer after swap. Under Metal,
     // LoadActionLoad on the first pass reads an undefined recycled drawable.
@@ -1491,7 +1785,6 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
     // content has already been drawn.
     const bool clearColorThisPass = clear || firstPassThisFrame || !_impl->frameHadColorClear;
     colorAttachment->setLoadAction(clearColorThisPass ? MTL::LoadActionClear : MTL::LoadActionLoad);
-    colorAttachment->setStoreAction(MTL::StoreActionStore);
     colorAttachment->setClearColor(MTL::ClearColor::Make(r, g, b, a));
     if (clearColorThisPass)
         _impl->frameHadColorClear = true;
@@ -1527,8 +1820,8 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
     MTL::Viewport viewport;
     viewport.originX = 0.0;
     viewport.originY = 0.0;
-    viewport.width = static_cast<double>(_impl->drawableWidth);
-    viewport.height = static_cast<double>(_impl->drawableHeight);
+    viewport.width = static_cast<double>(_impl->frameWidth);
+    viewport.height = static_cast<double>(_impl->frameHeight);
     viewport.znear = 0.0;
     viewport.zfar = 1.0;
     _impl->currentEncoder->setViewport(viewport);
@@ -1616,16 +1909,20 @@ void EngineMTLBootstrap::FlushTriangles2D()
     _impl->currentEncoder->setFrontFacingWinding(MTL::WindingClockwise);
     _impl->currentEncoder->setCullMode(measuredWorldCutout ? MTL::CullModeBack : MTL::CullModeNone);
 
-    // Clamp to the drawable -- Metal's setScissorRect raises a validation
-    // error if the rect extends past the render target.
-    int x0 = state.clipX < 0 ? 0 : state.clipX;
-    int y0 = state.clipY < 0 ? 0 : state.clipY;
-    int x1 = state.clipX + state.clipW;
-    int y1 = state.clipY + state.clipH;
-    if (x1 > _impl->drawableWidth)
-        x1 = _impl->drawableWidth;
-    if (y1 > _impl->drawableHeight)
-        y1 = _impl->drawableHeight;
+    // Clip rects arrive in window pixels; the frame target may be render-
+    // scaled. Clamp to the target -- Metal's setScissorRect raises a
+    // validation error if the rect extends past the render target.
+    const float clipScale =
+        _impl->drawableWidth > 0 ? static_cast<float>(_impl->frameWidth) / _impl->drawableWidth : 1.0f;
+    const auto scaled = [clipScale](int v) { return static_cast<int>(v * clipScale + 0.5f); };
+    int x0 = state.clipX < 0 ? 0 : scaled(state.clipX);
+    int y0 = state.clipY < 0 ? 0 : scaled(state.clipY);
+    int x1 = scaled(state.clipX + state.clipW);
+    int y1 = scaled(state.clipY + state.clipH);
+    if (x1 > _impl->frameWidth)
+        x1 = _impl->frameWidth;
+    if (y1 > _impl->frameHeight)
+        y1 = _impl->frameHeight;
     if (x1 <= x0 || y1 <= y0)
     {
         _impl->queued2DActive = false;
@@ -1777,6 +2074,9 @@ bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* scre
     // retain()'d when stored, so release them explicitly here too, after
     // they're done being used (endEncoding/presentDrawable/commit), rather
     // than relying on any pool's drain timing.
+    if (OffscreenActive())
+        ResolveToDrawable();
+
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
 
     _impl->currentEncoder->endEncoding();
@@ -2016,8 +2316,8 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     MTL::ScissorRect scissor;
     scissor.x = 0;
     scissor.y = 0;
-    scissor.width = static_cast<NS::UInteger>(_impl->drawableWidth);
-    scissor.height = static_cast<NS::UInteger>(_impl->drawableHeight);
+    scissor.width = static_cast<NS::UInteger>(_impl->frameWidth);
+    scissor.height = static_cast<NS::UInteger>(_impl->frameHeight);
     _impl->currentEncoder->setScissorRect(scissor);
 
     _impl->currentEncoder->setVertexBuffer(vbuf, 0, 0);
@@ -2338,6 +2638,17 @@ void EngineMTLBootstrap::Shutdown()
     {
         _impl->depthTexture->release();
         _impl->depthTexture = nullptr;
+    }
+    ReleaseFrameTarget();
+    if (_impl->presentPipeline != nullptr)
+    {
+        _impl->presentPipeline->release();
+        _impl->presentPipeline = nullptr;
+    }
+    if (_impl->presentSampler != nullptr)
+    {
+        _impl->presentSampler->release();
+        _impl->presentSampler = nullptr;
     }
     if (_impl->commandQueue != nullptr)
     {

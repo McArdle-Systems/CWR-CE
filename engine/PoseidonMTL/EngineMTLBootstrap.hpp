@@ -174,6 +174,19 @@ class EngineMTLBootstrap
     // True between BeginFrame() and its matching EndFrame().
     bool FrameOpen() const;
 
+    // Frame-target knobs, GL33's SetMsaaSamples/SetRenderScale/SetGamma. Any
+    // non-default value routes the frame through an offscreen target that a
+    // present pass resolves, scales and gamma-corrects into the drawable;
+    // all three default off, so the plain path renders straight into the
+    // drawable as before. Applied at the next frame's first BeginFrame.
+    void SetMsaaSamples(int samples); // 0/2/4/8, clamped to what the device supports
+    int MsaaSamples() const;
+    void SetRenderScale(float scale); // 1..2
+    float RenderScale() const;
+    void SetGamma(float gamma);
+    bool SetVSync(bool enabled);
+    bool VSync() const;
+
     // Command buffers that complete with an error, counted since startup,
     // and the most recent error's description. The GL33 analogue is its
     // KHR_debug error tally, which Trident diffs across a test.
@@ -436,7 +449,14 @@ class EngineMTLBootstrap
     void EnsurePipeline();          // lazy: compiles the embedded 2D MSL shader + pipeline state + depth states
     void EnsureTLPipeline();        // lazy: compiles the embedded mesh MSL shader + pipeline state
     void EnsureFallbackResources(); // lazy: 1x1 opaque white texture + sampler
-    void EnsureDepthTarget(int width, int height); // (re)creates the depth texture to match the drawable size
+    void EnsureDepthTarget(int width, int height, int sampleCount); // (re)creates the depth texture to match
+    void ApplyPendingFrameTarget();                                 // first BeginFrame of a frame
+    void EnsureFrameTarget(int width, int height);
+    void ReleaseFrameTarget();
+    void ReleaseRenderPipelines(); // so Ensure*Pipeline rebuild with the new sample count
+    void EnsurePresentPipeline();
+    bool OffscreenActive() const;
+    void ResolveToDrawable(); // ends the frame-target encoder, opens the present pass on the drawable
 
     struct Impl;
     Impl* _impl = nullptr;
