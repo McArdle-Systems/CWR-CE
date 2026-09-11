@@ -103,19 +103,33 @@ int FindSmallCutoffLevel(const std::vector<DecodedImage>& levels)
 
 TextureMTL::~TextureMTL()
 {
-    // Just the tiny link handle -- the GPU texture handles themselves
-    // (_smallGpuHandle/_bigGpuHandle) are released en masse by
-    // EngineMTLBootstrap::Shutdown(), same as every other texture, not
-    // individually here (matches the pre-existing TextBankMTL destructor
-    // comment's contract). The bank's running byte total isn't adjusted
-    // here either -- see TextBankMTL::ReleaseAllTextures's doc comment for
-    // why that's an accepted, documented tradeoff rather than an oversight.
+    if (_bank != nullptr)
+        _bank->OnTextureDestroyed(*this);
     if (_cache != nullptr)
     {
         _cache->Delete();
         delete _cache;
         _cache = nullptr;
     }
+}
+
+void TextureMTL::ReleaseMemory(EngineMTLBootstrap& bootstrap, TextBankMTL& bank)
+{
+    if (_dynamic)
+        return;
+    if (_bigGpuHandle != 0)
+    {
+        bank.AdjustTotalBigSurfaceBytes(-_bigSurfaceBytes);
+        EvictBigSurface(bootstrap);
+    }
+    if (_smallGpuHandle != 0)
+    {
+        bootstrap.DestroyTexture(_smallGpuHandle);
+        _smallGpuHandle = 0;
+    }
+    _levels.clear();
+    _levelPixels.clear();
+    _largestUsed = 0;
 }
 
 bool TextureMTL::LoadPixels(EngineMTLBootstrap& bootstrap)
@@ -406,6 +420,7 @@ bool TextureMTL::InitFromRGBA(EngineMTLBootstrap& bootstrap, int w, int h, const
     _smallCutoffLevel = 0; // single-mip dynamic texture -- always "small", never a big surface
     _bigGpuHandle = 0;
     _bigStartLevel = INT_MAX;
+    _dynamic = true;
     _smallGpuHandle = bootstrap.CreateTexture(w, h, static_cast<const uint8_t*>(rgba));
     if (_smallGpuHandle == 0)
         return false;

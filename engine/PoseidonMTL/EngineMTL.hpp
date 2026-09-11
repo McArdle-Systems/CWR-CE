@@ -257,12 +257,12 @@ class EngineMTL : public Engine
 
     AbstractTextBank* TextBank() override;
     void TextureDestroyed(Texture* /*tex*/) override {}
-    // Mirrors EngineGL33::ResetForRemount: drop the GPU textures tied to the
-    // old mod set so the new set reloads on demand. No GL33-style bind/
-    // pipeline-cache invalidation needed -- Metal has no equivalent global
-    // cache, and the caller (GameApplication::ReloadGameContent*) already
-    // clears m_canRender before this runs, so there's no in-flight queued
-    // draw that could reference a texture this releases.
+    // Mirrors EngineGL33::ResetForRemount: a remount only changes content,
+    // so the GPU textures tied to the old mod set go and the new set's
+    // reload on demand -- textures that outlive the remount (the cached
+    // animated water set) reload in place, and the detail set is rebuilt
+    // from the reloaded CfgDetailTextures. No GL33-style bind/pipeline-
+    // cache invalidation needed -- Metal has no equivalent global cache.
     void ResetForRemount() override;
 
     // Same guard band as GL33: Metal clips in NDC too, so a modest overflow
@@ -355,6 +355,8 @@ class EngineMTL : public Engine
     void PresentFrame();
 
     TextBankMTL* _textBank = nullptr;
+    // GPU handle for a draw, reloading a released texture first.
+    int GpuHandleOf(Texture* tex);
 
     // 3D mesh path: the TLVertexTable bound by BeginMesh (cleared by EndMesh)
     // and the texture handle PrepareTriangle most recently set, used by
