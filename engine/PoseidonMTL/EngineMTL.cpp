@@ -770,16 +770,14 @@ void EngineMTL::SetMaterial(const TLMaterial& mat, const LightList& lights, cons
     _tlObject.emissive[2] = mat.emmisive.B();
     _tlObject.emissive[3] = mat.emmisive.A();
 
-    // Local point/spot lights -- ported from GL33's UploadVSLights
-    // (EngineGL33_Shaders.cpp). Night-gated exactly like GL33: local lights
-    // (street lamps, vehicle headlights) only ever illuminate geometry once
-    // the sun's NightEffect kicks in, except DisableSun materials (cockpit
-    // interiors etc.), which the legacy SetupLights forces to full night
-    // regardless of the actual time of day.
+    // Local point/spot lights (street lamps, vehicle headlights): selected
+    // from the frame table by index (GL33's SetLocalLightIndices). The
+    // night gate lives in the raw material colours: they are zero by day
+    // except for DisableSun materials (cockpit interiors), which the legacy
+    // SetupLights forces to full night regardless of the time of day.
     float night = sun->NightEffect();
     if (render::Has(spec.material, render::Material::DisableSun))
         night = 1.0f;
-
     const Color matDif = mat.diffuse * night;
     const Color matAmb = mat.ambient * night;
     _tlObject.matDiffuseRaw[0] = matDif.R();
@@ -790,54 +788,8 @@ void EngineMTL::SetMaterial(const TLMaterial& mat, const LightList& lights, cons
     _tlObject.matAmbientRaw[1] = matAmb.G();
     _tlObject.matAmbientRaw[2] = matAmb.B();
     _tlObject.matAmbientRaw[3] = 0.0f;
-
-    int n = 0;
-    if (night > 0.0f && GScene->GetCamera() != nullptr)
-    {
-        const Vector3 camPos = GScene->GetCamera()->Position();
-        for (int i = 0; i < lights.Size() && n < kMaxLocalLightsMTL; i++)
-        {
-            Light* light = lights[i];
-            if (!light)
-                continue;
-            LightDescription desc;
-            light->GetDescription(desc);
-            const bool isSpot = desc.type == LTSpotLight;
-            if (desc.type != LTPoint && !isSpot)
-                continue; // point + spot lights; directional (sun) handled separately
-
-            LightMTL& l = _tlObject.lights[n];
-            // Camera-relative, matching the world matrix's convention (every
-            // other position-like field in ObjectConstantsMTL is already in
-            // this space).
-            l.posAndAtten[0] = static_cast<float>(desc.pos.X() - camPos.X());
-            l.posAndAtten[1] = static_cast<float>(desc.pos.Y() - camPos.Y());
-            l.posAndAtten[2] = static_cast<float>(desc.pos.Z() - camPos.Z());
-            l.posAndAtten[3] = desc.startAtten;
-
-            Vector3 beam = desc.dir;
-            beam.Normalize();
-            l.dirAndIsSpot[0] = static_cast<float>(beam.X());
-            l.dirAndIsSpot[1] = static_cast<float>(beam.Y());
-            l.dirAndIsSpot[2] = static_cast<float>(beam.Z());
-            l.dirAndIsSpot[3] = isSpot ? 1.0f : 0.0f;
-
-            const Color ldif = desc.diffuse * matDif;
-            l.diffuse[0] = ldif.R();
-            l.diffuse[1] = ldif.G();
-            l.diffuse[2] = ldif.B();
-            l.diffuse[3] = 0.0f;
-
-            const Color lamb = desc.ambient * matAmb;
-            l.ambient[0] = lamb.R();
-            l.ambient[1] = lamb.G();
-            l.ambient[2] = lamb.B();
-            l.ambient[3] = 0.0f;
-
-            n++;
-        }
-    }
-    _tlObject.lightCount[0] = static_cast<float>(n);
+    const auto packed = PackLightIndices(lights);
+    std::memcpy(_tlObject.lightIdx, packed.data(), sizeof(_tlObject.lightIdx));
 
     // Specular: sun-direction-only (GL33 doesn't apply specular from local
     // lights either) -- EngineGL33::DoSetMaterial's SelectPixelShaderSpecular
@@ -1148,9 +1100,8 @@ void EngineMTL::FlushQueues()
 }
 
 // Ported from EngineGL33::UploadLocalLights: raw light colours, positions
-// camera-relative to match the world matrices. The scalar path keeps its
-// per-object pre-multiplied lights (SetMaterial); only instanced runs read
-// this table.
+// camera-relative to match the world matrices. SetMaterial and
+// InstancedRunAdd select from it by index.
 void EngineMTL::UploadLocalLights(const LightList& aLights)
 {
     _localLightIndices.clear();
@@ -1301,6 +1252,19 @@ void EngineMTL::SetLandClipParams(float mode, Vector3Par boundingCenter)
     _tlObject.landClip[2] = active ? static_cast<float>(boundingCenter.Z()) : 0.0f;
 }
 
+std::array<std::uint32_t, 4> EngineMTL::PackLightIndices(const LightList& lights) const
+{
+    int idx[GL33LightIndices::Capacity];
+    int n = 0;
+    for (int i = 0; i < lights.Size() && n < GL33LightIndices::Capacity; i++)
+    {
+        auto it = _localLightIndices.find(lights[i]);
+        if (it != _localLightIndices.end())
+            idx[n++] = it->second;
+    }
+    return GL33LightIndices::Pack(idx, n);
+}
+
 bool EngineMTL::InstancedRunAdd(const Matrix4& modelToWorld, const LightList& lights)
 {
     if (_instPending >= kMaxInstancesMTL || GScene == nullptr || GScene->GetCamera() == nullptr)
@@ -1314,15 +1278,7 @@ bool EngineMTL::InstancedRunAdd(const Matrix4& modelToWorld, const LightList& li
     world._43 -= static_cast<float>(camPos.Z());
     std::memcpy(inst.world.m, &world, sizeof(world));
 
-    int idx[GL33LightIndices::Capacity];
-    int n = 0;
-    for (int i = 0; i < lights.Size() && n < GL33LightIndices::Capacity; i++)
-    {
-        auto it = _localLightIndices.find(lights[i]);
-        if (it != _localLightIndices.end())
-            idx[n++] = it->second;
-    }
-    const auto packed = GL33LightIndices::Pack(idx, n);
+    const auto packed = PackLightIndices(lights);
     std::memcpy(inst.lightIdx, packed.data(), sizeof(inst.lightIdx));
     ++_instPending;
     return true;

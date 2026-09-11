@@ -235,8 +235,7 @@ struct ObjectConstants {
     float4 diffuse;
     float4 emissive;
     float4 flags; // x=cutout, y=shader mode, z/w=grass alpha coefficients
-    float4 lightCount; // x = active local-light count (0..8)
-    LocalLight lights[8];
+    uint4 lightIdx; // GL33LightIndices packing of frame-table lights
     float4 specular;    // rgb + power(w) -- sun-direction-only highlight
     float4 specEnabled; // x = 1.0/0.0
     float4 constColor;  // IsColored tint + opacity, white otherwise
@@ -530,34 +529,20 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], uint iid [[instance_id]],
     // DrawShadow comment), so there's no shadow-alpha regression risk here.
     float litAlpha = clamp(obj.ambient.w + NdotL * obj.diffuse.w + obj.emissive.w, 0.0, 1.0);
 
-    // Local point/spot lights (street lamps, vehicle headlights) -- ported
-    // from GL33's per-vertex loop (EngineGL33_Shaders.cpp's
-    // s_vsTransformGLSL). obj.lightCount.x is 0 whenever EngineMTL::
-    // SetMaterial's night-effect gate didn't pass, so this loop is a no-op
-    // in ordinary daytime scenes -- matches GL33 exactly, not a Metal-only
-    // simplification. Spotlights additionally gate by a cone factor: full
-    // inside cos 8deg, zero outside cos 12deg, linear in cos^2 between.
-    if (obj.instanced.x > 0.5)
+    // Local point/spot lights (street lamps, vehicle headlights): the frame
+    // light table selected per object (or per instance), raw light colours
+    // scaled by the night-adjusted material -- GL33's localLights/lightIdx
+    // path. The material colours are zero by day, so this is a no-op in
+    // ordinary daytime scenes, as in GL33.
+    uint4 li = obj.instanced.x > 0.5 ? inst.lightIdx : obj.lightIdx;
+    int nLights = int(li.z);
+    for (int i = 0; i < nLights; i++)
     {
-        // Instanced: the frame light table selected per instance, raw light
-        // colours scaled by the night-adjusted material here (GL33's
-        // localLights/lightIdx path).
-        uint4 li = inst.lightIdx;
-        int nLights = int(li.z);
-        for (int i = 0; i < nLights; i++)
-        {
-            uint idx = ((i < 4 ? li.x : li.y) >> (8u * uint(i & 3))) & 0xFFu;
-            LocalLight l = lightTable.lights[idx];
-            l.diffuse.rgb *= obj.matDiffuseRaw.rgb;
-            l.ambient.rgb *= obj.matAmbientRaw.rgb;
-            lit += localLightContrib(l, worldPos4.xyz, worldNorm);
-        }
-    }
-    else
-    {
-        int nLights = int(obj.lightCount.x);
-        for (int i = 0; i < nLights; i++)
-            lit += localLightContrib(obj.lights[i], worldPos4.xyz, worldNorm);
+        uint idx = ((i < 4 ? li.x : li.y) >> (8u * uint(i & 3))) & 0xFFu;
+        LocalLight l = lightTable.lights[idx];
+        l.diffuse.rgb *= obj.matDiffuseRaw.rgb;
+        l.ambient.rgb *= obj.matAmbientRaw.rgb;
+        lit += localLightContrib(l, worldPos4.xyz, worldNorm);
     }
     lit = clamp(lit, 0.0, 1.0);
 
@@ -1106,8 +1091,11 @@ struct EngineMTLBootstrap::Impl
     MTL::Buffer* instanceBuffer = nullptr;
     size_t instanceOffset = 0;
     int instanceCount = 0;
+    // Rotating so an upload never overwrites a table a frame still in
+    // flight reads; lightTableBuffer is the most recent upload.
+    MTL::Buffer* lightTables[3] = {};
+    int lightTableNext = 0;
     MTL::Buffer* lightTableBuffer = nullptr;
-    size_t lightTableOffset = 0;
     // Bound in place of the above for scalar draws: one identity instance
     // and an empty light table, so the vertex stage always has valid buffers.
     MTL::Buffer* fallbackInstance = nullptr;
@@ -2605,7 +2593,6 @@ bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* scre
     }
     _impl->instanceBuffer = nullptr;
     _impl->instanceCount = 0;
-    _impl->lightTableBuffer = nullptr;
 
     pool->release();
 
@@ -2790,7 +2777,7 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     else
         _impl->currentEncoder->setVertexBuffer(_impl->fallbackInstance, 0, 3);
     if (_impl->lightTableBuffer != nullptr)
-        _impl->currentEncoder->setVertexBuffer(_impl->lightTableBuffer, _impl->lightTableOffset, 4);
+        _impl->currentEncoder->setVertexBuffer(_impl->lightTableBuffer, 0, 4);
     else
         _impl->currentEncoder->setVertexBuffer(_impl->fallbackLightTable, 0, 4);
     _impl->currentEncoder->setVertexTexture(_impl->heightMap != nullptr ? _impl->heightMap : _impl->fallbackWhite, 0);
@@ -3139,16 +3126,16 @@ bool EngineMTLBootstrap::SetTerrainHeightmap(const float* heights, int width, in
 
 void EngineMTLBootstrap::UploadLocalLightTable(const LocalLightTableMTL& table)
 {
-    _impl->lightTableBuffer = nullptr;
-    if (_impl->device == nullptr || _impl->currentEncoder == nullptr)
+    if (_impl->device == nullptr)
         return;
-    MTL::Buffer* buf = nullptr;
-    size_t offset = 0;
-    if (!_impl->StreamAlloc(sizeof(table), buf, offset))
+    MTL::Buffer*& buf = _impl->lightTables[_impl->lightTableNext];
+    _impl->lightTableNext = (_impl->lightTableNext + 1) % 3;
+    if (buf == nullptr)
+        buf = _impl->device->newBuffer(sizeof(table), MTL::ResourceStorageModeShared);
+    if (buf == nullptr)
         return;
-    std::memcpy(static_cast<uint8_t*>(buf->contents()) + offset, &table, sizeof(table));
+    std::memcpy(buf->contents(), &table, sizeof(table));
     _impl->lightTableBuffer = buf;
-    _impl->lightTableOffset = offset;
 }
 
 void EngineMTLBootstrap::UploadInstances(const InstanceMTL* instances, int count)
@@ -3438,7 +3425,9 @@ void EngineMTLBootstrap::Shutdown()
     }
     _impl->shadowQueue = Impl::QueuedShadowPass{};
     _impl->shadowCascadeRendered = false;
-    for (MTL::Buffer** buf : {&_impl->fallbackInstance, &_impl->fallbackLightTable})
+    for (MTL::Buffer** buf :
+         {&_impl->fallbackInstance, &_impl->fallbackLightTable, &_impl->lightTables[0], &_impl->lightTables[1],
+          &_impl->lightTables[2]})
     {
         if (*buf != nullptr)
         {

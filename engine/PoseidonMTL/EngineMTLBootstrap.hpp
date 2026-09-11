@@ -118,8 +118,6 @@ struct LightMTL
     float ambient[4];      // rgb = light ambient * nightEffect * material ambient; a unused
 };
 
-constexpr int kMaxLocalLightsMTL = 8; // matches GL33's VSConst::MaxLocalLights
-
 // Per-object constants for one DrawSectionTL call -- world matrix already
 // camera-relative (translation has the camera position subtracted, matching
 // GL33's PrepareMeshTLImpl), plus the material colors GL33 pre-combines with
@@ -140,12 +138,10 @@ struct ObjectConstantsMTL
     // y = shader mode: 0 normal, 1 detail, 2 grass, 3 water.
     // z/w = the two grass alpha coefficients supplied by SetGrassParams.
     float flags[4];
-    // Local point/spot lights (street lamps, vehicle headlights) -- ported
-    // from GL33's UploadVSLights. Only ever non-empty when the sun's
-    // NightEffect() > 0 or the material carries DisableSun (forced to full
-    // night) -- matches GL33's gate exactly, see EngineMTL::SetMaterial.
-    float lightCount[4]; // x = active count (0..kMaxLocalLightsMTL), rest unused
-    LightMTL lights[kMaxLocalLightsMTL];
+    // Which frame-table local lights (UploadLocalLights) apply to this
+    // object, GL33LightIndices-packed; instanced runs carry the same per
+    // instance. The night gate is folded into matDiffuseRaw/matAmbientRaw.
+    uint32_t lightIdx[4];
     // Specular: sun-direction-only highlight -- GL33 doesn't apply specular
     // from local lights either, only the sun. rgb = sun diffuse * material
     // specular color, w = material specular power. specEnabled.x gates it
@@ -156,12 +152,11 @@ struct ObjectConstantsMTL
     // for everything else. Same slot as GL33's PSConstants::SlotConstColor.
     float constColor[4];
     // Instanced runs read their world matrix and light selection from the
-    // InstanceMTL array instead of `world`/`lights` above; x = 1.0 when so.
+    // InstanceMTL array instead of `world`/`lightIdx` above; x = 1.0 when so.
     float instanced[4];
-    // Raw material diffuse/ambient already scaled by the night effect --
-    // the instanced light path multiplies the frame light table by these
-    // in the shader (GL33's matDiffuseRaw/matAmbientRaw), where the scalar
-    // path pre-multiplies on the CPU into `lights`.
+    // Raw material diffuse/ambient scaled by the night effect; the shader
+    // multiplies the table's raw light colours by these (GL33's
+    // matDiffuseRaw/matAmbientRaw).
     float matDiffuseRaw[4];
     float matAmbientRaw[4];
     // GL33's hmParams1: {boundingCenter.xyz, land-clip mode} for the next
@@ -181,7 +176,9 @@ constexpr int kMaxInstancesMTL = 256;    // matches GL33's WorldInstances UBO
 constexpr int kMaxLightTableMTL = 64;    // matches GL33's LocalLights UBO
 
 // The view's active local lights for the frame (EngineMTL::UploadLocalLights),
-// raw light colours, positions camera-relative.
+// raw light colours, positions camera-relative. Kept across frames: the
+// terrain draws before the scene uploads the new frame's table and reads
+// the previous one, as GL33's UBO does.
 struct LocalLightTableMTL
 {
     float count[4]; // x = active count
@@ -520,10 +517,9 @@ class EngineMTLBootstrap
                        Poseidon::render::ShaderFamily shader);
 
     // Instanced runs (Engine::InstancedRunAdd/BeginInstancedRunUpload): the
-    // instance array and light table live in a per-frame stream buffer, so
-    // both uploads are valid until EndFrame. While `count` > 1 every
-    // DrawSectionTL draws that many instances; EndInstancedRun() drops back
-    // to scalar draws.
+    // instance array lives in a per-frame stream buffer, valid until
+    // EndFrame. While `count` > 1 every DrawSectionTL draws that many
+    // instances; EndInstancedRun() drops back to scalar draws.
     // Shadow-map depth pass. QueueShadowCascades copies the casters into the
     // frame stream and EndFrame renders them from each light view-projection
     // into one slice of the cascade depth array, after the main pass; the

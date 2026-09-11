@@ -5,6 +5,8 @@
 #include <PoseidonGL33/SDLEventWindow.hpp>
 #include <PoseidonMTL/EngineMTLBootstrap.hpp>
 
+#include <array>
+#include <cstdint>
 #include <unordered_map>
 
 namespace Poseidon
@@ -450,6 +452,7 @@ class EngineMTL : public Engine
     bool _instImpure = false;
     // Light -> index into this frame's light table, rebuilt by UploadLocalLights.
     std::unordered_map<const Light*, int> _localLightIndices;
+    std::array<std::uint32_t, 4> PackLightIndices(const LightList& lights) const;
 
     void CreateWindowAndDevice();
 
