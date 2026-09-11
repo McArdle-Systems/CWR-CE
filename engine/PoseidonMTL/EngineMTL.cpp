@@ -672,7 +672,13 @@ void EngineMTL::PrepareTriangle(const MipInfo& mip, int specFlags)
     // world models, but their source art commonly contains graded alpha used
     // for row tinting/fades.  Reclassifying those pictures as the wheel's
     // near-opaque cutout makes unselected thumbnails black until highlighted.
-    const bool measuredCutout = !_legacyMeshUiOverlay && mip.IsOK() && mip._texture && mip._texture->IsTransparent();
+    // Optics overlays (weapon/vehicle optics models, RscObject binoculars)
+    // are stamped BestMipmap and drawn magnified across the screen; the
+    // near-opaque threshold below would discard everything but the core of
+    // their bilinear-filtered reticle lines, so they keep GL33's blend path.
+    const bool opticsOverlay = render::Has(spec.material, render::Material::BestMipmap);
+    const bool measuredCutout =
+        !_legacyMeshUiOverlay && !opticsOverlay && mip.IsOK() && mip._texture && mip._texture->IsTransparent();
     if (measuredCutout)
     {
         // Legacy model flags only say "has alpha". The decoded texture class
