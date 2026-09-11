@@ -135,6 +135,7 @@ class EngineMTL : public Engine
     void PrepareTriangle(const MipInfo& mip, int specFlags) override;
     void DrawPolygon(const VertexIndex* i, int n) override;
     void DrawPoints(int beg, int end) override;
+    void EnableNightEye(float night) override;
     void DrawSection(const FaceArray& face, Offset beg, Offset end) override;
     void DrawDecal(Vector3Par pos, float rhw, float sizeX, float sizeY, PackedColor col, const MipInfo& mip,
                    int specFlags) override;
@@ -257,6 +258,8 @@ class EngineMTL : public Engine
     int _bias = 0;
     float _gamma = 1.0f;
     bool _alphaToCoverage = false;
+    float _nightEye = 0.0f;
+    float _nightEyeCoef[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     WindowMode _windowMode = WindowMode::Borderless;
     int _windowedRestoreW = 0, _windowedRestoreH = 0;
 

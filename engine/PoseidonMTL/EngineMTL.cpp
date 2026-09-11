@@ -1052,6 +1052,7 @@ void EngineMTL::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelT
     ConvertProjectionMatrix(projection, camera->ProjectionNormal(), CanZBias() ? 0 : _bias);
     std::memcpy(_tlFrame.projection.m, &projection, sizeof(projection));
     _tlFrame.sunDirAndEnabled[3] = _sunEnabled ? 1.0f : 0.0f;
+    std::memcpy(_tlFrame.nightEyeCoef, _nightEyeCoef, sizeof(_nightEyeCoef));
 
     // Per-object: camera-relative world matrix (translation has the camera
     // position subtracted), same as GL33's PrepareMeshTLImpl.
@@ -1168,6 +1169,29 @@ void EngineMTL::DrawPoints(int beg, int end)
                   _currentTriDepthMode, _currentTriBlendMode, _currentTriSampler, _currentTriSurfaceMode,
                   _currentTriShader, _currentTriAlphaMode, _currentTriAlphaRef, specular, _currentTriDetailMode);
     }
+}
+
+void EngineMTL::EnableNightEye(float night)
+{
+    if (std::fabs(_nightEye - night) < 0.01f)
+        return;
+    FlushQueues();
+    _nightEye = night;
+    if (_nightEye > 0.01f)
+    {
+        _nightEyeCoef[0] = 0.2f;
+        _nightEyeCoef[1] = 0.9f;
+        _nightEyeCoef[2] = 0.4f;
+        _nightEyeCoef[3] = 1.0f - _nightEye;
+    }
+    else
+    {
+        _nightEyeCoef[0] = 0.0f;
+        _nightEyeCoef[1] = 0.0f;
+        _nightEyeCoef[2] = 0.0f;
+        _nightEyeCoef[3] = 1.0f;
+    }
+    _bootstrap.SetNightEyeCoef(_nightEyeCoef);
 }
 
 void EngineMTL::DrawSection(const FaceArray& face, Offset beg, Offset end)

@@ -68,11 +68,14 @@ struct FrameConstantsMTL
     // GL33 water constants: xyz = LightSun::SunDirection(), w = animation time.
     // This occupies the formerly-unused GL33 camPos-compatible tail slot.
     float waterSunDirAndTime[4];
+    // GL33's rgbEyeCoef: rgb = luminance weights, a = 1 - nightEye. Day is
+    // {0,0,0,1}, which leaves colour untouched.
+    float nightEyeCoef[4];
 };
 
 static_assert(offsetof(FrameConstantsMTL, waterSunDirAndTime) == 176,
               "FrameConstantsMTL water slot offset must match MSL");
-static_assert(sizeof(FrameConstantsMTL) == 192, "FrameConstantsMTL size must match MSL FrameConstants");
+static_assert(sizeof(FrameConstantsMTL) == 208, "FrameConstantsMTL size must match MSL FrameConstants");
 
 // One local point/spot light, matching GL33's per-light VSConstants layout
 // (EngineGL33.hpp's SlotLightPos/Diffuse/Ambient/Dir, EngineGL33_Shaders.cpp's
@@ -186,6 +189,10 @@ class EngineMTLBootstrap
     void SetGamma(float gamma);
     bool SetVSync(bool enabled);
     bool VSync() const;
+
+    // Night-eye desaturation for the 2D/legacy path (the TL path carries it
+    // in FrameConstantsMTL::nightEyeCoef). Splits the 2D batch on change.
+    void SetNightEyeCoef(const float coef[4]);
 
     // Command buffers that complete with an error, counted since startup,
     // and the most recent error's description. The GL33 analogue is its

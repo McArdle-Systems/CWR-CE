@@ -87,7 +87,8 @@ fragment float4 fs2d(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
                      texture2d<float> detailTex [[texture(1)]], sampler samp [[sampler(0)]],
                      sampler detailSamp [[sampler(1)]],
                      constant float4& fogColor [[buffer(0)]],
-                     constant float2& alphaTest [[buffer(1)]])
+                     constant float2& alphaTest [[buffer(1)]],
+                     constant float4& nightEyeCoef [[buffer(2)]])
 {
     float4 texColor = tex.sample(samp, in.uv);
     float4 lit = texColor * in.color;
@@ -104,6 +105,9 @@ fragment float4 fs2d(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
         float4 detail = detailTex.sample(detailSamp, in.uv1);
         lit.rgb *= detail.a * 2.0;
     }
+    float luminance = saturate(dot(lit.rgb, nightEyeCoef.rgb));
+    float nightBlend = saturate(luminance + nightEyeCoef.a);
+    lit.rgb = mix(float3(luminance), lit.rgb, nightBlend);
     float3 rgb = mix(fogColor.rgb, lit.rgb, saturate(in.fogTC));
     return float4(rgb, lit.a);
 }
@@ -193,7 +197,17 @@ struct FrameConstants {
     float4 fogParams;
     float4 fogColor;
     float4 waterSunDirAndTime;
+    float4 nightEyeCoef;
 };
+
+// GL33's psNormal/psDetail night-eye term: pull colour toward luminance as
+// the eye's night response grows.
+static inline float3 applyNightEye(float3 rgb, float4 coef)
+{
+    float luminance = saturate(dot(rgb, coef.rgb));
+    float nightBlend = saturate(luminance + coef.a);
+    return mix(float3(luminance), rgb, nightBlend);
+}
 
 // One local point/spot light -- mirrors LightMTL (EngineMTLBootstrap.hpp)
 // field-for-field, ported from GL33's per-vertex lighting loop
@@ -455,7 +469,7 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
     }
     float3 diffuseLit = texColor.rgb * in.color.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
-    float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
+    float3 finalColor = mix(applyNightEye(detailed.rgb, frame.nightEyeCoef), frame.fogColor.rgb, in.fogFactor);
     if (frame.fogParams.w > 0.5)
         return float4(1.0, 0.0, 0.0, 1.0);
     return float4(finalColor, in.color.a * detailed.a);
@@ -485,7 +499,7 @@ fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& 
         discard_fragment();
     float3 diffuseLit = texColor.rgb * in.color.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
-    float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
+    float3 finalColor = mix(applyNightEye(detailed.rgb, frame.nightEyeCoef), frame.fogColor.rgb, in.fogFactor);
     if (frame.fogParams.w > 0.5)
         return float4(1.0, 0.0, 0.0, 1.0);
     return float4(finalColor, in.color.a * detailed.a);
@@ -770,6 +784,7 @@ struct EngineMTLBootstrap::Impl
         Poseidon::render::AlphaMode alphaMode = Poseidon::render::AlphaMode::Disabled;
         std::uint8_t alphaRef = 0;
         float fogColor[3] = {0.0f, 0.0f, 0.0f};
+        float nightEye[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
         bool operator==(const Triangles2DState& rhs) const
         {
@@ -778,12 +793,14 @@ struct EngineMTLBootstrap::Impl
                    useDepth == rhs.useDepth && depthMode == rhs.depthMode && blendMode == rhs.blendMode &&
                    sampler == rhs.sampler && surface == rhs.surface && shader == rhs.shader &&
                    alphaMode == rhs.alphaMode && alphaRef == rhs.alphaRef && fogColor[0] == rhs.fogColor[0] &&
-                   fogColor[1] == rhs.fogColor[1] && fogColor[2] == rhs.fogColor[2];
+                   fogColor[1] == rhs.fogColor[1] && fogColor[2] == rhs.fogColor[2] &&
+                   std::memcmp(nightEye, rhs.nightEye, sizeof(nightEye)) == 0;
         }
         bool operator!=(const Triangles2DState& rhs) const { return !(*this == rhs); }
     };
     bool queued2DActive = false;
     Triangles2DState queued2DState;
+    float nightEyeCoef[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     std::vector<Vertex2DMTL> queued2DVertices;
     std::vector<uint16_t> queued2DIndices;
     MTL::Buffer* queued2DVertexBuffer = nullptr;
@@ -1113,6 +1130,11 @@ bool EngineMTLBootstrap::SetVSync(bool enabled)
 bool EngineMTLBootstrap::VSync() const
 {
     return _impl->vsync;
+}
+
+void EngineMTLBootstrap::SetNightEyeCoef(const float coef[4])
+{
+    std::memcpy(_impl->nightEyeCoef, coef, sizeof(_impl->nightEyeCoef));
 }
 
 bool EngineMTLBootstrap::OffscreenActive() const
@@ -1865,6 +1887,7 @@ void EngineMTLBootstrap::FlushTriangles2D()
                                   state.alphaMode == Poseidon::render::AlphaMode::TestAndBlend;
     const float alphaTestBuf[2] = {state.alphaRef / 255.0f, alphaTestEnabled ? 1.0f : 0.0f};
     _impl->currentEncoder->setFragmentBytes(alphaTestBuf, sizeof(alphaTestBuf), 1);
+    _impl->currentEncoder->setFragmentBytes(state.nightEye, sizeof(state.nightEye), 2);
 
     // Explicit rebind, not inherited from BeginFrame's initial bind -- a
     // DrawSectionTL call earlier in this same encoder would otherwise leave
@@ -2040,6 +2063,7 @@ void EngineMTLBootstrap::DrawTriangles2D(const Vertex2DMTL* verts, int vertCount
     state.fogColor[0] = fogColor ? fogColor[0] : 0.0f;
     state.fogColor[1] = fogColor ? fogColor[1] : 0.0f;
     state.fogColor[2] = fogColor ? fogColor[2] : 0.0f;
+    std::memcpy(state.nightEye, _impl->nightEyeCoef, sizeof(state.nightEye));
 
     if (_impl->queued2DActive &&
         (_impl->queued2DState != state ||
