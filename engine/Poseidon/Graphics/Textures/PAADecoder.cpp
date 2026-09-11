@@ -544,6 +544,12 @@ DecodedImage DecodePAABuffer(const void* data, size_t size, bool isPaa)
         in.seekg(-2, QIOS::cur);
         format = isPaa ? PacARGB4444 : PacP8;
     }
+    else
+    {
+        // A format marker means PAA-style level data whatever the extension
+        // (the original gun textures are AI88 inside .pac files).
+        isPaa = true;
+    }
 
     PacPalette pal;
     int offsets[16];
@@ -589,6 +595,12 @@ DecodedImageChain DecodePAABufferAllMips(const void* data, size_t size, bool isP
     {
         in.seekg(-2, QIOS::cur);
         format = isPaa ? PacARGB4444 : PacP8;
+    }
+    else
+    {
+        // A format marker means PAA-style level data whatever the extension
+        // (the original gun textures are AI88 inside .pac files).
+        isPaa = true;
     }
 
     PacPalette pal;
@@ -675,6 +687,12 @@ DecodedImage DecodePAAFileMip(const std::string& path, int mipLevel)
     {
         in.seekg(-2, QIOS::cur);
         format = isPaa ? PacARGB4444 : PacP8;
+    }
+    else
+    {
+        // A format marker means PAA-style level data whatever the extension
+        // (the original gun textures are AI88 inside .pac files).
+        isPaa = true;
     }
 
     PacPalette pal;
