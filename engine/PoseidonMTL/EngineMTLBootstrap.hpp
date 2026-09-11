@@ -82,11 +82,30 @@ struct FrameConstantsMTL
     // texels per land square, 0, 0}.
     float hmParams[4];
     float landGrid[4];
+    // Shadow-map lit state (GL33's PSConstants shadowCtl/cascadeVP/cascadeSplits/
+    // cascadeCtl/camFwd): {enable, 0, darkness, texelSize}, per-cascade
+    // column-major light view-projections, per-tier select distance,
+    // {count, fadeRange, biasBase, omniCount}, camera forward.
+    float shadowCtl[4];
+    float cascadeVP[4 * 16];
+    float cascadeSplits[4];
+    float cascadeCtl[4];
+    float camFwd[4];
 };
 
 static_assert(offsetof(FrameConstantsMTL, waterSunDirAndTime) == 176,
               "FrameConstantsMTL water slot offset must match MSL");
-static_assert(sizeof(FrameConstantsMTL) == 240, "FrameConstantsMTL size must match MSL FrameConstants");
+static_assert(sizeof(FrameConstantsMTL) == 560, "FrameConstantsMTL size must match MSL FrameConstants");
+
+// One alpha-tested shadow-caster batch (Engine::ShadowCasterBatch with the
+// texture resolved to a GPU handle).
+struct ShadowAlphaBatchMTL
+{
+    int textureHandle;
+    int firstVertex;
+    int vertexCount;
+};
+constexpr int kShadowCascadesMTL = 4;
 
 // One local point/spot light, matching GL33's per-light VSConstants layout
 // (EngineGL33.hpp's SlotLightPos/Diffuse/Ambient/Dir, EngineGL33_Shaders.cpp's
@@ -505,6 +524,21 @@ class EngineMTLBootstrap
     // both uploads are valid until EndFrame. While `count` > 1 every
     // DrawSectionTL draws that many instances; EndInstancedRun() drops back
     // to scalar draws.
+    // Shadow-map depth pass. QueueShadowCascades copies the casters into the
+    // frame stream and EndFrame renders them from each light view-projection
+    // into one slice of the cascade depth array, after the main pass; the
+    // lit shaders sample that array the next frame (GL33 has the same
+    // one-frame latency). Solid casters store their back faces, alpha
+    // batches discard on texture alpha with no culling.
+    bool QueueShadowCascades(const float* lightVPs, int numCascades, int res, const float* solidXYZ,
+                             int solidVertexCount, const float* alphaXYZUV, int alphaVertexCount,
+                             const ShadowAlphaBatchMTL* batches, int batchCount);
+    // Synchronous single-map render + readback (row 0 = bottom, like GL's
+    // glReadPixels) for the triShadowDepthProbe oracle cross-check.
+    bool ShadowDepthProbe(const float* lightVP16, const float* triXYZ, int vertCount, int res, float* outDepth);
+    // Reads slice 0 of the last rendered cascade array, top-down. Waits for the GPU.
+    bool ReadShadowCascade0(std::vector<float>& outDepth, int& outRes);
+
     // Terrain height grid as an R32 texture the mesh vertex stage samples for
     // land clipping; the frame's hmParams/landGrid carry the grid scales.
     bool SetTerrainHeightmap(const float* heights, int width, int height);
@@ -525,6 +559,9 @@ class EngineMTLBootstrap
     void ReleaseFrameTarget();
     void ReleaseRenderPipelines(); // so Ensure*Pipeline rebuild with the new sample count
     void EnsurePresentPipeline();
+    void EnsureShadowDepthPipelines();
+    bool EnsureShadowCascadeArray(int res, int layers);
+    void EncodeQueuedShadowCascades(); // EndFrame, after the main encoders
     bool OffscreenActive() const;
     void ResolveToDrawable(); // ends the frame-target encoder, opens the present pass on the drawable
 

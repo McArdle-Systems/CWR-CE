@@ -8,6 +8,7 @@
 #include <Poseidon/Dev/Debug/DebugOverlay.hpp>
 #include <Poseidon/Graphics/Shared/WindowPlacement.hpp>
 #include <Poseidon/Graphics/Shared/ScreenshotWriter.hpp>
+#include <Poseidon/Graphics/Shared/PNGWriter.hpp>
 #include <Poseidon/Graphics/Core/TLVertex.hpp>
 #include <Poseidon/Graphics/Core/MatrixConversion.hpp>
 #include <Poseidon/Graphics/Rendering/BuildRenderPassDescriptor.hpp>
@@ -27,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace Poseidon
 {
@@ -237,6 +239,7 @@ void EngineMTL::InitDraw(bool clear, PackedColor color)
     // Force PrepareMeshTL to rebuild its cached view/sun/fog constants at
     // least once this frame (camera/sun/fog can change between frames).
     _tlFrameValid = false;
+    UpdateShadowMapLitState();
 
     Engine::InitDraw(clear, color);
     _frameOpen = true;
@@ -1190,6 +1193,94 @@ void EngineMTL::UploadLocalLights(const LightList& aLights)
     }
     table.count[0] = static_cast<float>(n);
     _bootstrap.UploadLocalLightTable(table);
+}
+
+void EngineMTL::UpdateShadowMapLitState()
+{
+    float ctl[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+    float splits[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float cascadeCtl[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float camFwd[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+    if (_shadowTuning.enabled && _shadowMapActive && _shadowCascades > 0)
+    {
+        ctl[0] = 1.0f;
+        // Full darkness by day, none at night (the scene drives the sun factor).
+        ctl[2] = 1.0f - _shadowSunFactor * (1.0f - _shadowTuning.darkness);
+        ctl[3] = (_shadowMapRes > 0) ? (1.0f / static_cast<float>(_shadowMapRes)) : 0.0f;
+        cascadeCtl[0] = static_cast<float>(_shadowCascades);
+        cascadeCtl[1] = _shadowTuning.fadeRange;
+        cascadeCtl[2] = _shadowTuning.biasBase;
+        cascadeCtl[3] = static_cast<float>(_shadowOmniCount);
+        for (int i = 0; i < _shadowCascades; i++)
+            splits[i] = _shadowSplits[i];
+        camFwd[0] = _shadowCamFwd[0];
+        camFwd[1] = _shadowCamFwd[1];
+        camFwd[2] = _shadowCamFwd[2];
+        std::memcpy(_tlFrame.cascadeVP, _shadowMapVP, sizeof(float) * 16 * static_cast<size_t>(_shadowCascades));
+    }
+    std::memcpy(_tlFrame.shadowCtl, ctl, sizeof(ctl));
+    std::memcpy(_tlFrame.cascadeSplits, splits, sizeof(splits));
+    std::memcpy(_tlFrame.cascadeCtl, cascadeCtl, sizeof(cascadeCtl));
+    std::memcpy(_tlFrame.camFwd, camFwd, sizeof(camFwd));
+}
+
+void EngineMTL::RenderShadowDepthScene(const float* lightVPs, const float* splitViewDist, const float* camFwd3,
+                                       int numCascades, int omniCount, int res, const ShadowCasterSet& casters)
+{
+    if (numCascades > kShadowCascadesMTL)
+        numCascades = kShadowCascadesMTL;
+
+    // Resolve each alpha batch's caster texture (loading its base mip if the
+    // depth pass beat the lit draw to it), as SetTexture does.
+    std::vector<ShadowAlphaBatchMTL> batches;
+    batches.reserve(static_cast<size_t>(casters.alphaBatchCount));
+    for (int b = 0; b < casters.alphaBatchCount; b++)
+    {
+        const ShadowCasterBatch& src = casters.alphaBatches[b];
+        TextureMTL* tex = dynamic_cast<TextureMTL*>(src.texture);
+        if (_textBank && tex)
+            _textBank->UseMipmap(tex, 0, 0);
+        batches.push_back({tex ? tex->GpuHandle() : 0, src.firstVertex, src.vertexCount});
+    }
+
+    const bool queued = numCascades >= 1 &&
+                        _bootstrap.QueueShadowCascades(lightVPs, numCascades, res, casters.solidXYZ,
+                                                       casters.solidVertexCount, casters.alphaXYZUV,
+                                                       casters.alphaVertexCount, batches.data(),
+                                                       static_cast<int>(batches.size()));
+    if (!queued)
+    {
+        _shadowMapActive = false;
+        return;
+    }
+    _shadowMapRes = res;
+    _shadowCascades = numCascades;
+    _shadowOmniCount = (omniCount < 0) ? 0 : (omniCount > numCascades ? numCascades : omniCount);
+    std::memcpy(_shadowMapVP, lightVPs, sizeof(float) * 16 * static_cast<size_t>(numCascades));
+    for (int i = 0; i < numCascades; i++)
+        _shadowSplits[i] = splitViewDist[i];
+    _shadowCamFwd[0] = camFwd3[0];
+    _shadowCamFwd[1] = camFwd3[1];
+    _shadowCamFwd[2] = camFwd3[2];
+    _shadowMapActive = true;
+}
+
+bool EngineMTL::DumpShadowMap(const char* path)
+{
+    if (!path || !_shadowMapActive)
+        return false;
+    std::vector<float> depth;
+    int res = 0;
+    if (!_bootstrap.ReadShadowCascade0(depth, res) || res <= 0)
+        return false;
+    // Same grey mapping as GL33's dump; Metal's rows are already top-down.
+    std::vector<uint8_t> gray(static_cast<size_t>(res) * res);
+    for (size_t i = 0; i < gray.size(); i++)
+    {
+        const float d = depth[i];
+        gray[i] = (d >= 0.999f) ? static_cast<uint8_t>(35) : static_cast<uint8_t>((0.15f + (1.0f - d) * 0.85f) * 255.0f);
+    }
+    return PNGWriter::WritePNG(path, res, res, 1, gray.data());
 }
 
 void EngineMTL::SetTerrainHeightmap(const float* heights, int width, int height, float invGrid, float invLandGrid)

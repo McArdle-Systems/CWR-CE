@@ -203,6 +203,11 @@ struct FrameConstants {
     float4 nightEyeCoef;
     float4 hmParams; // {invGrid, camX, camZ, camY}
     float4 landGrid; // {invLandGrid, heightmap texels per land square, 0, 0}
+    float4 shadowCtl;      // {enable, 0, darkness, texelSize}
+    float4x4 cascadeVP[4]; // column-major, camera-relative
+    float4 cascadeSplits;  // per-tier select distance (omni: radius; frustum: far eye-depth)
+    float4 cascadeCtl;     // {count, fadeRange, biasBase, omniCount}
+    float4 camFwd;
 };
 
 // GL33's psNormal/psDetail night-eye term: pull colour toward luminance as
@@ -370,7 +375,79 @@ struct VSOutMesh {
     float fogFactor;
     float isCutout; // obj.flags.x passed through -- see fsMeshOpaque
     float detailMode; // obj.flags.y: 0 normal, 1 detail, 2 grass
+    float3 worldRel;  // camera-relative world position for the cascade shadow lookup
 };
+
+// Cascaded shadow-map factor -- ported from GL33's psNormal/psDetail/psGrass
+// kernel. The first omniCount tiers are camera-centred spheres selected by
+// 3D distance, the rest frustum slices selected by eye-depth; pick the
+// tightest tier, fall through to the first tier whose projection is in
+// bounds, 3x3-PCF it, cross-fade to the next tier over a band, fade at the
+// far edge and dim in fog. Returns the multiplier for the lit colour.
+// Depth texture rows run top-down here, so the projected y is flipped.
+static inline float shadowMapFactor(constant FrameConstants& frame, float3 worldRel, float fogFactor,
+                                    depth2d_array<float> shadowMap, sampler shadowSamp)
+{
+    if (frame.shadowCtl.x <= 0.5)
+        return 1.0;
+    int nC = int(frame.cascadeCtl.x);
+    int omniN = int(frame.cascadeCtl.w);
+    float eyeDepth = dot(worldRel, frame.camFwd.xyz);
+    float dist3D = length(worldRel);
+    int ci = nC;
+    for (int i = 0; i < 4; ++i)
+    {
+        if (i >= nC)
+            break;
+        float metric = (i < omniN) ? dist3D : eyeDepth;
+        if (metric <= frame.cascadeSplits[i])
+        {
+            ci = i;
+            break;
+        }
+    }
+    if (ci >= nC)
+        return 1.0;
+    float ts = frame.shadowCtl.w;
+    float prevEdge = (ci > 0) ? frame.cascadeSplits[ci - 1] : 0.0;
+    float ciMetric = (ci < omniN) ? dist3D : eyeDepth;
+    float band = (frame.cascadeSplits[ci] - prevEdge) * 0.15;
+    float bw = (ci + 1 < nC) ? clamp((ciMetric - (frame.cascadeSplits[ci] - band)) / max(band, 0.001), 0.0, 1.0)
+                             : 0.0;
+    float litSum = 0.0;
+    float wSum = 0.0;
+    for (int p = 0; p < 4; ++p)
+    {
+        int c = ci + p;
+        if (c >= nC)
+            break;
+        float w = (p == 0) ? (1.0 - bw) : ((wSum <= 0.0) ? 1.0 : ((p == 1) ? bw : 0.0));
+        if (w <= 0.0)
+            continue;
+        float4 cp = frame.cascadeVP[c] * float4(worldRel, 1.0);
+        float3 sc = cp.xyz / cp.w;
+        float2 suv = float2(sc.x * 0.5 + 0.5, 0.5 - sc.y * 0.5);
+        if (suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0 && sc.z > 0.0 && sc.z < 1.0)
+        {
+            float bias = frame.cascadeCtl.z * float(c + 1) * float(c + 1);
+            float lit = 0.0;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                    lit += (sc.z - bias > shadowMap.sample(shadowSamp, suv + float2(float(dx), float(dy)) * ts, c))
+                               ? 0.0
+                               : 1.0;
+            litSum += w * (lit / 9.0);
+            wSum += w;
+        }
+    }
+    if (wSum <= 0.0)
+        return 1.0;
+    float lit = litSum / wSum;
+    float lastSplit = frame.cascadeSplits[nC - 1];
+    float fade = clamp((lastSplit - eyeDepth) / max(frame.cascadeCtl.y, 0.001), 0.0, 1.0);
+    float strength = (1.0 - lit) * fade * (1.0 - fogFactor);
+    return mix(1.0, frame.shadowCtl.z, strength);
+}
 
 vertex VSOutMesh vsMesh(uint vid [[vertex_id]], uint iid [[instance_id]],
                         const device VertexMesh* verts [[buffer(0)]], constant ObjectConstants& obj [[buffer(1)]],
@@ -531,6 +608,7 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], uint iid [[instance_id]],
     // EngineMTL::PrepareTriangleTL) -- see fsMeshOpaque's discard test.
     out.isCutout = obj.flags.x;
     out.detailMode = obj.flags.y;
+    out.worldRel = worldPos4.xyz;
     return out;
 }
 
@@ -592,7 +670,8 @@ constant bool kAlphaToCoverage [[function_constant(0)]];
 fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants& frame [[buffer(0)]],
                              constant ObjectConstants& obj [[buffer(1)]],
                              texture2d<float> tex [[texture(0)]], texture2d<float> detailTex [[texture(1)]],
-                             sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]])
+                             depth2d_array<float> shadowMap [[texture(2)]],
+                             sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]], sampler shadowSamp [[sampler(2)]])
 {
     float4 texColor = tex.sample(samp, in.uv);
     float outAlpha = -1.0;
@@ -616,6 +695,8 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
     }
     float3 diffuseLit = texColor.rgb * in.color.rgb * obj.constColor.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
+    if (in.detailMode < 2.5) // water is not shadow-mapped, as in GL33
+        detailed.rgb *= shadowMapFactor(frame, in.worldRel, in.fogFactor, shadowMap, shadowSamp);
     float3 finalColor = mix(applyNightEye(detailed.rgb, frame.nightEyeCoef), frame.fogColor.rgb, in.fogFactor);
     if (frame.fogParams.w > 0.5)
         return float4(1.0, 0.0, 0.0, 1.0);
@@ -629,7 +710,8 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
 fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& frame [[buffer(0)]],
                             constant ObjectConstants& obj [[buffer(1)]],
                             texture2d<float> tex [[texture(0)]], texture2d<float> detailTex [[texture(1)]],
-                            sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]])
+                            depth2d_array<float> shadowMap [[texture(2)]],
+                            sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]], sampler shadowSamp [[sampler(2)]])
 {
     float4 texColor = tex.sample(samp, in.uv);
     // Alpha-blended mesh sections still write depth, matching the legacy
@@ -646,6 +728,8 @@ fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& 
         discard_fragment();
     float3 diffuseLit = texColor.rgb * in.color.rgb * obj.constColor.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
+    if (in.detailMode < 2.5) // water is not shadow-mapped, as in GL33
+        detailed.rgb *= shadowMapFactor(frame, in.worldRel, in.fogFactor, shadowMap, shadowSamp);
     float3 finalColor = mix(applyNightEye(detailed.rgb, frame.nightEyeCoef), frame.fogColor.rgb, in.fogFactor);
     if (frame.fogParams.w > 0.5)
         return float4(1.0, 0.0, 0.0, 1.0);
@@ -699,6 +783,7 @@ vertex VSOutMesh vsShadow(uint vid [[vertex_id]], uint iid [[instance_id]],
     out.fogFactor = 0.0;
     out.isCutout = 0.0;
     out.detailMode = 0.0;
+    out.worldRel = float3(0.0);
     return out;
 }
 
@@ -726,6 +811,53 @@ fragment float4 fsShadow(VSOutMesh in [[stage_in]], texture2d<float> tex [[textu
     if (a < (1.0 / 255.0))
         discard_fragment();
     return float4(0.0, 0.0, 0.0, a);
+}
+)";
+
+// Shadow-map depth pass (GL33's EngineGL33_ShadowDepth.cpp programs): solid
+// casters are position-only with no fragment stage; alpha casters carry a UV
+// and discard on the caster texture's alpha so cutout foliage casts its
+// silhouette.
+const char* kShaderSourceShadowDepth = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct DepthOut {
+    float4 position [[position]];
+};
+
+vertex DepthOut vsShadowDepth(uint vid [[vertex_id]], const device packed_float3* pos [[buffer(0)]],
+                              constant float4x4& lightVP [[buffer(1)]])
+{
+    DepthOut out;
+    out.position = lightVP * float4(float3(pos[vid]), 1.0);
+    return out;
+}
+
+struct DepthAlphaOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+struct CasterAlphaVertex {
+    packed_float3 pos;
+    packed_float2 uv;
+};
+
+vertex DepthAlphaOut vsShadowDepthAlpha(uint vid [[vertex_id]], const device CasterAlphaVertex* verts [[buffer(0)]],
+                                        constant float4x4& lightVP [[buffer(1)]])
+{
+    DepthAlphaOut out;
+    out.position = lightVP * float4(float3(verts[vid].pos), 1.0);
+    out.uv = float2(verts[vid].uv);
+    return out;
+}
+
+fragment void fsShadowDepthAlpha(DepthAlphaOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
+                                 sampler samp [[sampler(0)]])
+{
+    if (tex.sample(samp, in.uv).a < 0.5)
+        discard_fragment();
 }
 )";
 
@@ -981,6 +1113,32 @@ struct EngineMTLBootstrap::Impl
     MTL::Buffer* fallbackInstance = nullptr;
     MTL::Buffer* fallbackLightTable = nullptr;
     MTL::Texture* heightMap = nullptr; // SetTerrainHeightmap; fallbackWhite stands in until then
+
+    // Shadow-map depth pass (see QueueShadowCascades). The pipelines are
+    // sample-count independent (depth-only targets) so they survive
+    // ReleaseRenderPipelines.
+    MTL::RenderPipelineState* shadowDepthPipeline = nullptr;
+    MTL::RenderPipelineState* shadowDepthAlphaPipeline = nullptr;
+    MTL::DepthStencilState* shadowDepthState = nullptr;
+    MTL::Texture* shadowCascadeArray = nullptr; // Depth32Float 2D array, sampled by the lit shaders
+    MTL::Texture* shadowFallbackArray = nullptr; // 1x1x1, bound when no map is active
+    MTL::Texture* shadowProbeTarget = nullptr;   // single map for ShadowDepthProbe
+    int shadowCascadeRes = 0;
+    int shadowCascadeLayers = 0;
+    bool shadowCascadeRendered = false; // a pass has been committed into shadowCascadeArray
+    struct QueuedShadowPass
+    {
+        bool pending = false;
+        int numCascades = 0;
+        float lightVPs[kShadowCascadesMTL * 16] = {};
+        MTL::Buffer* solidBuffer = nullptr;
+        size_t solidOffset = 0;
+        int solidVertexCount = 0;
+        MTL::Buffer* alphaBuffer = nullptr;
+        size_t alphaOffset = 0;
+        int alphaVertexCount = 0;
+        std::vector<ShadowAlphaBatchMTL> batches;
+    } shadowQueue;
 
     bool StreamAlloc(size_t bytes, MTL::Buffer*& outBuffer, size_t& outOffset)
     {
@@ -1951,6 +2109,17 @@ void EngineMTLBootstrap::EnsureFallbackResources()
     LocalLightTableMTL emptyTable = {};
     _impl->fallbackLightTable =
         _impl->device->newBuffer(&emptyTable, sizeof(emptyTable), MTL::ResourceStorageModeShared);
+
+    MTL::TextureDescriptor* shadowDesc = MTL::TextureDescriptor::alloc()->init();
+    shadowDesc->setTextureType(MTL::TextureType2DArray);
+    shadowDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
+    shadowDesc->setWidth(1);
+    shadowDesc->setHeight(1);
+    shadowDesc->setArrayLength(1);
+    shadowDesc->setUsage(MTL::TextureUsageShaderRead);
+    shadowDesc->setStorageMode(MTL::StorageModePrivate);
+    _impl->shadowFallbackArray = _impl->device->newTexture(shadowDesc);
+    shadowDesc->release();
 }
 
 bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool clear, bool clearZ)
@@ -2353,6 +2522,7 @@ bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* scre
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
 
     _impl->currentEncoder->endEncoding();
+    EncodeQueuedShadowCascades();
 
     MTL::Buffer* screenshotBuffer = nullptr;
     int captureWidth = 0;
@@ -2628,6 +2798,13 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     _impl->currentEncoder->setFragmentBytes(&objDraw, sizeof(objDraw), 1);
     _impl->currentEncoder->setFragmentTexture(tex, 0);
     _impl->currentEncoder->setFragmentTexture(secondaryTex, 1);
+    // Cascade depth array for the lit shadow test; frame.shadowCtl.x gates the
+    // sampling, so the fallback only has to be a valid binding.
+    MTL::Texture* shadowTex = _impl->shadowCascadeRendered && _impl->shadowCascadeArray != nullptr
+                                  ? _impl->shadowCascadeArray
+                                  : _impl->shadowFallbackArray;
+    _impl->currentEncoder->setFragmentTexture(shadowTex, 2);
+    _impl->currentEncoder->setFragmentSamplerState(_impl->samplerStates[7], 2); // point, clamp both axes
 
     const NS::UInteger offsetBytes = static_cast<NS::UInteger>(firstIndex) * sizeof(uint16_t);
     if (instanced)
@@ -2638,6 +2815,299 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
         _impl->currentEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(indexCount),
                                                      MTL::IndexTypeUInt16, ibuf, offsetBytes);
     ++Poseidon::gPerfDrawCalls;
+}
+
+void EngineMTLBootstrap::EnsureShadowDepthPipelines()
+{
+    if (_impl->shadowDepthPipeline != nullptr || _impl->device == nullptr)
+        return;
+
+    NS::Error* error = nullptr;
+    NS::String* src = NS::String::string(kShaderSourceShadowDepth, NS::StringEncoding::UTF8StringEncoding);
+    MTL::Library* library = _impl->device->newLibrary(src, nullptr, &error);
+    if (library == nullptr)
+    {
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: shadow-depth shader compile failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+        return;
+    }
+    MTL::Function* vsSolid =
+        library->newFunction(NS::String::string("vsShadowDepth", NS::StringEncoding::UTF8StringEncoding));
+    MTL::Function* vsAlpha =
+        library->newFunction(NS::String::string("vsShadowDepthAlpha", NS::StringEncoding::UTF8StringEncoding));
+    MTL::Function* fsAlpha =
+        library->newFunction(NS::String::string("fsShadowDepthAlpha", NS::StringEncoding::UTF8StringEncoding));
+
+    MTL::RenderPipelineDescriptor* desc = MTL::RenderPipelineDescriptor::alloc()->init();
+    desc->setVertexFunction(vsSolid);
+    desc->setFragmentFunction(nullptr);
+    desc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+    desc->setSampleCount(1);
+    _impl->shadowDepthPipeline = _impl->device->newRenderPipelineState(desc, &error);
+    if (_impl->shadowDepthPipeline == nullptr)
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: shadow-depth pipeline creation failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+
+    desc->setVertexFunction(vsAlpha);
+    desc->setFragmentFunction(fsAlpha);
+    _impl->shadowDepthAlphaPipeline = _impl->device->newRenderPipelineState(desc, &error);
+    if (_impl->shadowDepthAlphaPipeline == nullptr)
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: shadow-depth alpha pipeline creation failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+    desc->release();
+
+    MTL::DepthStencilDescriptor* depthDesc = MTL::DepthStencilDescriptor::alloc()->init();
+    depthDesc->setDepthCompareFunction(MTL::CompareFunctionLessEqual);
+    depthDesc->setDepthWriteEnabled(true);
+    _impl->shadowDepthState = _impl->device->newDepthStencilState(depthDesc);
+    depthDesc->release();
+
+    vsSolid->release();
+    vsAlpha->release();
+    fsAlpha->release();
+    library->release();
+}
+
+bool EngineMTLBootstrap::EnsureShadowCascadeArray(int res, int layers)
+{
+    if (_impl->shadowCascadeArray != nullptr && _impl->shadowCascadeRes == res && _impl->shadowCascadeLayers == layers)
+        return true;
+    if (_impl->shadowCascadeArray != nullptr)
+    {
+        _impl->shadowCascadeArray->release();
+        _impl->shadowCascadeArray = nullptr;
+        _impl->shadowCascadeRendered = false;
+    }
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    desc->setTextureType(MTL::TextureType2DArray);
+    desc->setPixelFormat(MTL::PixelFormatDepth32Float);
+    desc->setWidth(static_cast<NS::UInteger>(res));
+    desc->setHeight(static_cast<NS::UInteger>(res));
+    desc->setArrayLength(static_cast<NS::UInteger>(layers));
+    desc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    desc->setStorageMode(MTL::StorageModePrivate);
+    _impl->shadowCascadeArray = _impl->device->newTexture(desc);
+    desc->release();
+    if (_impl->shadowCascadeArray == nullptr)
+        return false;
+    _impl->shadowCascadeRes = res;
+    _impl->shadowCascadeLayers = layers;
+    return true;
+}
+
+namespace
+{
+// One depth-only pass into `target` slice `slice` from `lightVP`: solid
+// casters keep their back faces (front-face cull, so a lit surface is always
+// nearer the light than the stored depth and cannot self-shadow), alpha
+// batches are two-sided with a texture-alpha discard. Mirrors GL33's
+// RenderCascadeArray loop body.
+void EncodeShadowDepthPass(MTL::CommandBuffer* cmd, MTL::Texture* target, int slice, const float* lightVP,
+                           MTL::RenderPipelineState* solidPipeline, MTL::RenderPipelineState* alphaPipeline,
+                           MTL::DepthStencilState* depthState, MTL::Buffer* solidBuffer, size_t solidOffset,
+                           int solidCount, MTL::Buffer* alphaBuffer, size_t alphaOffset,
+                           const std::vector<ShadowAlphaBatchMTL>* batches, const std::vector<MTL::Texture*>& textures,
+                           MTL::Texture* fallbackWhite, MTL::SamplerState* alphaSampler)
+{
+    MTL::RenderPassDescriptor* pass = MTL::RenderPassDescriptor::alloc()->init();
+    MTL::RenderPassDepthAttachmentDescriptor* depth = pass->depthAttachment();
+    depth->setTexture(target);
+    depth->setSlice(static_cast<NS::UInteger>(slice));
+    depth->setLoadAction(MTL::LoadActionClear);
+    depth->setClearDepth(1.0);
+    depth->setStoreAction(MTL::StoreActionStore);
+    MTL::RenderCommandEncoder* enc = cmd->renderCommandEncoder(pass);
+    pass->release();
+
+    enc->setDepthStencilState(depthState);
+    enc->setFrontFacingWinding(MTL::WindingClockwise);
+    enc->setVertexBytes(lightVP, sizeof(float) * 16, 1);
+    if (solidCount >= 3 && solidBuffer != nullptr)
+    {
+        enc->setRenderPipelineState(solidPipeline);
+        enc->setCullMode(MTL::CullModeFront);
+        enc->setVertexBuffer(solidBuffer, solidOffset, 0);
+        enc->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), static_cast<NS::UInteger>(solidCount));
+    }
+    if (batches != nullptr && !batches->empty() && alphaBuffer != nullptr)
+    {
+        enc->setRenderPipelineState(alphaPipeline);
+        enc->setCullMode(MTL::CullModeNone);
+        enc->setVertexBuffer(alphaBuffer, alphaOffset, 0);
+        enc->setFragmentSamplerState(alphaSampler, 0);
+        for (const ShadowAlphaBatchMTL& b : *batches)
+        {
+            if (b.vertexCount < 3)
+                continue;
+            MTL::Texture* tex = fallbackWhite;
+            if (b.textureHandle > 0 && static_cast<size_t>(b.textureHandle) <= textures.size() &&
+                textures[b.textureHandle - 1] != nullptr)
+                tex = textures[b.textureHandle - 1];
+            enc->setFragmentTexture(tex, 0);
+            enc->drawPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(b.firstVertex),
+                                static_cast<NS::UInteger>(b.vertexCount));
+        }
+    }
+    enc->endEncoding();
+}
+} // namespace
+
+bool EngineMTLBootstrap::QueueShadowCascades(const float* lightVPs, int numCascades, int res, const float* solidXYZ,
+                                             int solidVertexCount, const float* alphaXYZUV, int alphaVertexCount,
+                                             const ShadowAlphaBatchMTL* batches, int batchCount)
+{
+    Impl::QueuedShadowPass& q = _impl->shadowQueue;
+    q = Impl::QueuedShadowPass{};
+    const bool haveSolid = solidXYZ != nullptr && solidVertexCount >= 3;
+    const bool haveAlpha = alphaXYZUV != nullptr && alphaVertexCount >= 3 && batches != nullptr && batchCount > 0;
+    if (_impl->device == nullptr || _impl->currentEncoder == nullptr || lightVPs == nullptr || res <= 0 ||
+        numCascades < 1 || (!haveSolid && !haveAlpha))
+        return false;
+    if (numCascades > kShadowCascadesMTL)
+        numCascades = kShadowCascadesMTL;
+    EnsureShadowDepthPipelines();
+    if (_impl->shadowDepthPipeline == nullptr || _impl->shadowDepthAlphaPipeline == nullptr ||
+        !EnsureShadowCascadeArray(res, numCascades))
+        return false;
+
+    if (haveSolid)
+    {
+        const size_t bytes = static_cast<size_t>(solidVertexCount) * 3 * sizeof(float);
+        if (!_impl->StreamAlloc(bytes, q.solidBuffer, q.solidOffset))
+            return false;
+        std::memcpy(static_cast<uint8_t*>(q.solidBuffer->contents()) + q.solidOffset, solidXYZ, bytes);
+        q.solidVertexCount = solidVertexCount;
+    }
+    if (haveAlpha)
+    {
+        const size_t bytes = static_cast<size_t>(alphaVertexCount) * 5 * sizeof(float);
+        if (!_impl->StreamAlloc(bytes, q.alphaBuffer, q.alphaOffset))
+            return false;
+        std::memcpy(static_cast<uint8_t*>(q.alphaBuffer->contents()) + q.alphaOffset, alphaXYZUV, bytes);
+        q.alphaVertexCount = alphaVertexCount;
+        q.batches.assign(batches, batches + batchCount);
+    }
+    std::memcpy(q.lightVPs, lightVPs, sizeof(float) * 16 * static_cast<size_t>(numCascades));
+    q.numCascades = numCascades;
+    q.pending = true;
+    return true;
+}
+
+void EngineMTLBootstrap::EncodeQueuedShadowCascades()
+{
+    Impl::QueuedShadowPass& q = _impl->shadowQueue;
+    if (!q.pending || _impl->currentCommandBuffer == nullptr || _impl->shadowCascadeArray == nullptr)
+    {
+        q.pending = false;
+        return;
+    }
+    for (int i = 0; i < q.numCascades; i++)
+    {
+        EncodeShadowDepthPass(_impl->currentCommandBuffer, _impl->shadowCascadeArray, i, q.lightVPs + i * 16,
+                              _impl->shadowDepthPipeline, _impl->shadowDepthAlphaPipeline, _impl->shadowDepthState,
+                              q.solidBuffer, q.solidOffset, q.solidVertexCount, q.alphaBuffer, q.alphaOffset,
+                              &q.batches, _impl->textures, _impl->fallbackWhite, _impl->samplerStates[0]);
+    }
+    _impl->shadowCascadeRendered = true;
+    q = Impl::QueuedShadowPass{};
+}
+
+bool EngineMTLBootstrap::ShadowDepthProbe(const float* lightVP16, const float* triXYZ, int vertCount, int res,
+                                          float* outDepth)
+{
+    if (_impl->device == nullptr || _impl->commandQueue == nullptr || lightVP16 == nullptr || triXYZ == nullptr ||
+        vertCount < 3 || res <= 0 || outDepth == nullptr)
+        return false;
+    EnsureShadowDepthPipelines();
+    EnsureFallbackResources();
+    if (_impl->shadowDepthPipeline == nullptr)
+        return false;
+
+    if (_impl->shadowProbeTarget != nullptr && static_cast<int>(_impl->shadowProbeTarget->width()) != res)
+    {
+        _impl->shadowProbeTarget->release();
+        _impl->shadowProbeTarget = nullptr;
+    }
+    if (_impl->shadowProbeTarget == nullptr)
+    {
+        MTL::TextureDescriptor* desc = MTL::TextureDescriptor::texture2DDescriptor(
+            MTL::PixelFormatDepth32Float, static_cast<NS::UInteger>(res), static_cast<NS::UInteger>(res), false);
+        desc->setUsage(MTL::TextureUsageRenderTarget);
+        desc->setStorageMode(MTL::StorageModePrivate);
+        _impl->shadowProbeTarget = _impl->device->newTexture(desc);
+        desc->release();
+        if (_impl->shadowProbeTarget == nullptr)
+            return false;
+    }
+
+    const size_t vertBytes = static_cast<size_t>(vertCount) * 3 * sizeof(float);
+    MTL::Buffer* verts = _impl->device->newBuffer(triXYZ, vertBytes, MTL::ResourceStorageModeShared);
+    const size_t rowBytes = static_cast<size_t>(res) * sizeof(float);
+    MTL::Buffer* readback = _impl->device->newBuffer(rowBytes * static_cast<size_t>(res), MTL::ResourceStorageModeShared);
+    if (verts == nullptr || readback == nullptr)
+    {
+        if (verts)
+            verts->release();
+        if (readback)
+            readback->release();
+        return false;
+    }
+
+    MTL::CommandBuffer* cmd = _impl->commandQueue->commandBuffer();
+    // Single-map probe: capture both faces, like GL33's RenderDepthFBO.
+    MTL::RenderPassDescriptor* pass = MTL::RenderPassDescriptor::alloc()->init();
+    pass->depthAttachment()->setTexture(_impl->shadowProbeTarget);
+    pass->depthAttachment()->setLoadAction(MTL::LoadActionClear);
+    pass->depthAttachment()->setClearDepth(1.0);
+    pass->depthAttachment()->setStoreAction(MTL::StoreActionStore);
+    MTL::RenderCommandEncoder* enc = cmd->renderCommandEncoder(pass);
+    pass->release();
+    enc->setRenderPipelineState(_impl->shadowDepthPipeline);
+    enc->setDepthStencilState(_impl->shadowDepthState);
+    enc->setCullMode(MTL::CullModeNone);
+    enc->setVertexBuffer(verts, 0, 0);
+    enc->setVertexBytes(lightVP16, sizeof(float) * 16, 1);
+    enc->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), static_cast<NS::UInteger>(vertCount));
+    enc->endEncoding();
+
+    MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
+    blit->copyFromTexture(_impl->shadowProbeTarget, 0, 0, MTL::Origin(0, 0, 0), MTL::Size(res, res, 1), readback, 0,
+                          rowBytes, rowBytes * static_cast<size_t>(res), MTL::BlitOptionNone);
+    blit->endEncoding();
+    cmd->commit();
+    cmd->waitUntilCompleted();
+
+    // Rows come back top-down; GL's readback (the oracle's layout) is bottom-up.
+    const float* src = static_cast<const float*>(readback->contents());
+    for (int y = 0; y < res; y++)
+        std::memcpy(outDepth + static_cast<size_t>(res - 1 - y) * res, src + static_cast<size_t>(y) * res, rowBytes);
+    verts->release();
+    readback->release();
+    return true;
+}
+
+bool EngineMTLBootstrap::ReadShadowCascade0(std::vector<float>& outDepth, int& outRes)
+{
+    if (_impl->device == nullptr || _impl->commandQueue == nullptr || !_impl->shadowCascadeRendered ||
+        _impl->shadowCascadeArray == nullptr)
+        return false;
+    const int res = _impl->shadowCascadeRes;
+    const size_t rowBytes = static_cast<size_t>(res) * sizeof(float);
+    MTL::Buffer* readback = _impl->device->newBuffer(rowBytes * static_cast<size_t>(res), MTL::ResourceStorageModeShared);
+    if (readback == nullptr)
+        return false;
+    MTL::CommandBuffer* cmd = _impl->commandQueue->commandBuffer();
+    MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
+    blit->copyFromTexture(_impl->shadowCascadeArray, 0, 0, MTL::Origin(0, 0, 0), MTL::Size(res, res, 1), readback, 0,
+                          rowBytes, rowBytes * static_cast<size_t>(res), MTL::BlitOptionNone);
+    blit->endEncoding();
+    cmd->commit();
+    cmd->waitUntilCompleted();
+    outDepth.assign(static_cast<const float*>(readback->contents()),
+                    static_cast<const float*>(readback->contents()) + static_cast<size_t>(res) * res);
+    outRes = res;
+    readback->release();
+    return true;
 }
 
 bool EngineMTLBootstrap::SetTerrainHeightmap(const float* heights, int width, int height)
@@ -2945,6 +3415,29 @@ void EngineMTLBootstrap::Shutdown()
         _impl->heightMap->release();
         _impl->heightMap = nullptr;
     }
+    for (MTL::Texture** tex : {&_impl->shadowCascadeArray, &_impl->shadowFallbackArray, &_impl->shadowProbeTarget})
+    {
+        if (*tex != nullptr)
+        {
+            (*tex)->release();
+            *tex = nullptr;
+        }
+    }
+    for (MTL::RenderPipelineState** ps : {&_impl->shadowDepthPipeline, &_impl->shadowDepthAlphaPipeline})
+    {
+        if (*ps != nullptr)
+        {
+            (*ps)->release();
+            *ps = nullptr;
+        }
+    }
+    if (_impl->shadowDepthState != nullptr)
+    {
+        _impl->shadowDepthState->release();
+        _impl->shadowDepthState = nullptr;
+    }
+    _impl->shadowQueue = Impl::QueuedShadowPass{};
+    _impl->shadowCascadeRendered = false;
     for (MTL::Buffer** buf : {&_impl->fallbackInstance, &_impl->fallbackLightTable})
     {
         if (*buf != nullptr)

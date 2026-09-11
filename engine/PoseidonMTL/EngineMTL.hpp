@@ -221,6 +221,23 @@ class EngineMTL : public Engine
     }
     bool InstancedRunActive() const override { return _instCount > 1; }
 
+    // Shadow maps (opt-in, dev overlay / tri verbs): the scene's cascade
+    // depth pass is queued and rendered at the end of the frame; the lit
+    // shaders sample the previous frame's map, the same latency GL33 has.
+    void SetShadowMapsEnabled(bool enabled) override { _shadowTuning.enabled = enabled; }
+    bool ShadowMapsEnabled() const override { return _shadowTuning.enabled; }
+    ShadowMapTuning GetShadowMapTuning() const override { return _shadowTuning; }
+    void SetShadowMapTuning(const ShadowMapTuning& tuning) override { _shadowTuning = tuning; }
+    void SetShadowMapSunFactor(float f) override { _shadowSunFactor = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f); }
+    void RenderShadowDepthScene(const float* lightVPs, const float* splitViewDist, const float* camFwd3,
+                                int numCascades, int omniCount, int res, const ShadowCasterSet& casters) override;
+    bool ShadowDepthProbe(const float* lightVP16, const float* triXYZ, int vertCount, int res,
+                          float* outDepth) override
+    {
+        return _bootstrap.ShadowDepthProbe(lightVP16, triXYZ, vertCount, res, outDepth);
+    }
+    bool DumpShadowMap(const char* path) override;
+
     // GPU land clip -- GL33's design: the terrain height grid lives in a
     // vertex-stage texture and vsMesh snaps ClipLandKeep/ClipLandOn vertices
     // to it, so the CPU deform is skipped (Object::SkipCpuLandClip) and
@@ -410,6 +427,19 @@ class EngineMTL : public Engine
     render::SamplerMode _tlSectionSampler = {render::SamplerFilter::Linear, false, false};
     bool _sunEnabled = false;
     float _grassParams[4] = {};
+
+    ShadowMapTuning _shadowTuning;
+    float _shadowSunFactor = 1.0f;
+    bool _shadowMapActive = false; // a depth pass was queued with the state below
+    int _shadowMapRes = 0;
+    int _shadowCascades = 0;
+    int _shadowOmniCount = 0;
+    float _shadowMapVP[kShadowCascadesMTL * 16] = {};
+    float _shadowSplits[kShadowCascadesMTL] = {};
+    float _shadowCamFwd[3] = {};
+    // Snapshots the shadow-map lit state into _tlFrame at frame start, so a
+    // depth pass queued mid-frame is not paired with the previous map.
+    void UpdateShadowMapLitState();
 
     bool _heightmapValid = false;
     float _hmInvGrid = 0.0f;
