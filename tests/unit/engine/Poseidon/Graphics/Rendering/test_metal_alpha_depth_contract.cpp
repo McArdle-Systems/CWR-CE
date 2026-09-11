@@ -55,7 +55,7 @@ TEST_CASE("Metal cutouts preserve coverage without transparent depth writes", "[
     // Texture alpha only -- in.color.a is the sun's ambient brightness, not opacity, and
     // must not affect whether depth is written (GitHub #60: dawn's dim ambient collapsed
     // this term and discarded real geometry's depth).
-    REQUIRE(blendRegion.find("if (texColor.a < (18.0 / 255.0))") != std::string::npos);
+    REQUIRE(blendRegion.find("if (texColor.a < (1.0 / 255.0))") != std::string::npos);
     REQUIRE(blendRegion.find("discard_fragment();") != std::string::npos);
 
     const size_t cutoutShader = bootstrap.find("fragment float4 fsMeshOpaque");

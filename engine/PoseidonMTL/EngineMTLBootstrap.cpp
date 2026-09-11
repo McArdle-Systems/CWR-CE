@@ -703,13 +703,13 @@ fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& 
     // renderer. Never let their fully transparent texture background write
     // an invisible depth rectangle: this is essential for antialiased
     // cutout-like details such as tent ropes and perforated wreck parts.
-    // AI88 is currently expanded through ARGB4444, whose first non-zero
-    // alpha step is 17/255. Treat that lowest quantization step as clear; it
-    // is visually negligible but otherwise stamps depth around thin ropes.
+    // The threshold is GL33's alphaRef for blended sections (1/255): a
+    // higher one punches holes in faint glass reflections (the A-10 canopy
+    // showed a pale blotch where its texture alpha dipped below 18/255).
     // Texture alpha only -- in.color.a (obj.ambient.w) tracks the sun's ambient
     // brightness, not opacity, and would wrongly discard real geometry's depth
     // whenever ambient light is dim (dawn/dusk; see fsMeshOpaque's coverage comment).
-    if (texColor.a < (18.0 / 255.0))
+    if (texColor.a < (1.0 / 255.0))
         discard_fragment();
     float3 diffuseLit = texColor.rgb * in.color.rgb * obj.constColor.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
