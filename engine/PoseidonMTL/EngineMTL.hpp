@@ -136,6 +136,20 @@ class EngineMTL : public Engine
     void DrawPolygon(const VertexIndex* i, int n) override;
     void DrawPoints(int beg, int end) override;
     void EnableNightEye(float night) override;
+    // TL draws are immediate and PrepareMeshTL rebuilds the projection from
+    // the camera on every call, so a clip-range change only needs the
+    // queued 2D work committed first (GL33's load-bearing step too).
+    void UpdateProjection() override { FlushQueues(); }
+    // The 2D batch always draws in submission order (GL33's reorder-off
+    // behaviour), so only the flush at the reorder boundary carries over.
+    void EnableReorderQueues(bool enable) override
+    {
+        if (_reorderQueues == enable)
+            return;
+        _reorderQueues = enable;
+        if (!enable)
+            FlushQueues();
+    }
     void DrawSection(const FaceArray& face, Offset beg, Offset end) override;
     void DrawDecal(Vector3Par pos, float rhw, float sizeX, float sizeY, PackedColor col, const MipInfo& mip,
                    int specFlags) override;
@@ -259,6 +273,7 @@ class EngineMTL : public Engine
     float _gamma = 1.0f;
     bool _alphaToCoverage = false;
     float _nightEye = 0.0f;
+    bool _reorderQueues = false;
     float _nightEyeCoef[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     WindowMode _windowMode = WindowMode::Borderless;
     int _windowedRestoreW = 0, _windowedRestoreH = 0;
