@@ -11,8 +11,12 @@
 #include <SDL3/SDL_metal.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 // Log.hpp itself only pulls in <spdlog/spdlog.h> -- it does NOT transitively
@@ -424,6 +428,8 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
     float3 diffuseLit = texColor.rgb * in.color.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
     float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
+    if (frame.fogParams.w > 0.5)
+        return float4(1.0, 0.0, 0.0, 1.0);
     return float4(finalColor, in.color.a * detailed.a);
 }
 
@@ -452,6 +458,8 @@ fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& 
     float3 diffuseLit = texColor.rgb * in.color.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
     float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
+    if (frame.fogParams.w > 0.5)
+        return float4(1.0, 0.0, 0.0, 1.0);
     return float4(finalColor, in.color.a * detailed.a);
 }
 
@@ -593,6 +601,45 @@ DrawableSizeChoice ResolveDrawableSize(SDL_Window* window, int fallbackWidth, in
 
 struct EngineMTLBootstrap::Impl
 {
+    std::atomic<unsigned> debugErrorCount{0};
+    std::atomic<int> inFlightCommandBuffers{0};
+    std::mutex debugMessageMutex;
+    std::string lastDebugMessage;
+
+    // Completion handlers run on Metal's own thread, hence the atomics/mutex.
+    // Must be called before commit().
+    void TrackCommandBufferErrors(MTL::CommandBuffer* cmdBuf)
+    {
+        inFlightCommandBuffers.fetch_add(1, std::memory_order_acq_rel);
+        cmdBuf->addCompletedHandler(
+            [this](MTL::CommandBuffer* completed)
+            {
+                if (completed->status() == MTL::CommandBufferStatusError)
+                {
+                    debugErrorCount.fetch_add(1, std::memory_order_relaxed);
+                    const NS::Error* error = completed->error();
+                    const char* text =
+                        error ? error->localizedDescription()->utf8String() : "unknown command buffer error";
+                    {
+                        std::lock_guard<std::mutex> lock(debugMessageMutex);
+                        lastDebugMessage = text;
+                    }
+                    LOG_ERROR(Graphics, "EngineMTLBootstrap: command buffer failed: {}", text);
+                }
+                inFlightCommandBuffers.fetch_sub(1, std::memory_order_acq_rel);
+            });
+    }
+
+    // Shutdown deletes this Impl; a handler firing afterwards would touch
+    // freed memory.
+    void WaitForInFlightCommandBuffers()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (inFlightCommandBuffers.load(std::memory_order_acquire) > 0 &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+    }
+
     SDL_MetalView metalView = nullptr;
     CA::MetalLayer* layer = nullptr;
     MTL::Device* device = nullptr;
@@ -880,6 +927,7 @@ void EngineMTLBootstrap::RenderClearAndPresent(float r, float g, float b, float 
     MTL::RenderCommandEncoder* encoder = cmdBuf->renderCommandEncoder(passDesc);
     encoder->endEncoding();
 
+    _impl->TrackCommandBufferErrors(cmdBuf);
     cmdBuf->presentDrawable(drawable);
     cmdBuf->commit();
 
@@ -892,6 +940,22 @@ void EngineMTLBootstrap::OnWindowResized(int width, int height)
     if (_impl->layer == nullptr)
         return;
     ApplyDrawableSize(width, height, "window resize");
+}
+
+bool EngineMTLBootstrap::FrameOpen() const
+{
+    return _impl->currentEncoder != nullptr;
+}
+
+unsigned EngineMTLBootstrap::DebugErrorCount() const
+{
+    return _impl->debugErrorCount.load(std::memory_order_relaxed);
+}
+
+std::string EngineMTLBootstrap::LastDebugMessage() const
+{
+    std::lock_guard<std::mutex> lock(_impl->debugMessageMutex);
+    return _impl->lastDebugMessage;
 }
 
 int EngineMTLBootstrap::DrawableWidth() const
@@ -1739,6 +1803,7 @@ bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* scre
         }
     }
 
+    _impl->TrackCommandBufferErrors(_impl->currentCommandBuffer);
     _impl->currentCommandBuffer->presentDrawable(_impl->currentDrawable);
     _impl->currentCommandBuffer->commit();
 
@@ -2148,6 +2213,7 @@ void EngineMTLBootstrap::ClearTexturePool()
 
 void EngineMTLBootstrap::Shutdown()
 {
+    _impl->WaitForInFlightCommandBuffers();
     ShutdownDebugOverlayRenderer();
 
     for (MTL::Texture*& tex : _impl->textures)

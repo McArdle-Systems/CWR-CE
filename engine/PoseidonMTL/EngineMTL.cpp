@@ -257,8 +257,11 @@ void EngineMTL::FinishDraw()
     _frameOpen = false;
 }
 
-void EngineMTL::NextFrame()
+void EngineMTL::PresentFrame()
 {
+    if (!_bootstrap.FrameOpen())
+        return;
+
     if (_tridentReadback || _pendingScreenshotPath.GetLength() > 0)
     {
         const RString path = _pendingScreenshotPath;
@@ -281,12 +284,39 @@ void EngineMTL::NextFrame()
     {
         _bootstrap.EndFrame();
     }
+}
+
+void EngineMTL::NextFrame()
+{
+    PresentFrame();
     Engine::NextFrame();
+}
+
+void EngineMTL::FlushPendingScreenshot()
+{
+    if (_pendingScreenshotPath.GetLength() == 0 || _frameOpen)
+        return;
+    if (_bootstrap.FrameOpen())
+    {
+        PresentFrame();
+        return;
+    }
+    // Between frames there is nothing left to read from the GPU; the cached
+    // copy of the last presented frame is what GL33's back buffer holds too.
+    if (!_lastFrameRGB.empty())
+    {
+        ScreenshotWriter::WriteRGB(_pendingScreenshotPath, _lastFrameWidth, _lastFrameHeight, _lastFrameRGB.data());
+        _pendingScreenshotPath = "";
+    }
 }
 
 int EngineMTL::SampleBackBufferNonBlack()
 {
-    if (!_tridentReadback || _lastFrameRGB.empty() || _lastFrameWidth <= 0 || _lastFrameHeight <= 0)
+    if (!_tridentReadback)
+        return -1;
+    if (!_frameOpen)
+        PresentFrame();
+    if (_lastFrameRGB.empty() || _lastFrameWidth <= 0 || _lastFrameHeight <= 0)
         return -1;
 
     int nonBlack = 0;
@@ -307,8 +337,11 @@ int EngineMTL::SampleBackBufferNonBlack()
 
 bool EngineMTL::SamplePixel(int x, int y, uint8_t* outRGB)
 {
-    if (!_tridentReadback || outRGB == nullptr || _lastFrameRGB.empty() || x < 0 || y < 0 || x >= _lastFrameWidth ||
-        y >= _lastFrameHeight)
+    if (!_tridentReadback || outRGB == nullptr)
+        return false;
+    if (!_frameOpen)
+        PresentFrame();
+    if (_lastFrameRGB.empty() || x < 0 || y < 0 || x >= _lastFrameWidth || y >= _lastFrameHeight)
         return false;
 
     const size_t offset = (static_cast<size_t>(y) * static_cast<size_t>(_lastFrameWidth) + static_cast<size_t>(x)) * 3u;
@@ -316,6 +349,61 @@ bool EngineMTL::SamplePixel(int x, int y, uint8_t* outRGB)
     outRGB[1] = _lastFrameRGB[offset + 1];
     outRGB[2] = _lastFrameRGB[offset + 2];
     return true;
+}
+
+void EngineMTL::DrawTestPattern(const char* name)
+{
+    if (!_frameOpen || name == nullptr)
+        return;
+
+    const Rect2DAbs clip(0.0f, 0.0f, static_cast<float>(_w), static_cast<float>(_h));
+    const float w = static_cast<float>(_w);
+    const float h = static_cast<float>(_h);
+    auto drawQuad = [&](float x0, float y0, float x1, float y1, const DWORD(&argb)[4])
+    {
+        const float xy[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
+        const float uv[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        const PackedColor colors[4] = {PackedColor(argb[0]), PackedColor(argb[1]), PackedColor(argb[2]),
+                                       PackedColor(argb[3])};
+        DrawFan2D(xy, nullptr, nullptr, uv, nullptr, colors, 4, 0, 0, clip, render::DepthMode::Disabled,
+                  render::BlendMode::Opaque);
+    };
+    auto clearTo = [&](DWORD argb) { Clear(true, true, PackedColor(argb)); };
+
+    if (std::strcmp(name, "gradient3d") == 0)
+    {
+        drawQuad(0, 0, w, h, {0xFFFF0000, 0xFF00FF00, 0xFFFFFFFF, 0xFF0000FF});
+    }
+    else if (std::strcmp(name, "colorbar") == 0)
+    {
+        const DWORD colors[5] = {0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFFFF00FF};
+        const float barW = w / 5.0f;
+        for (int i = 0; i < 5; i++)
+            drawQuad(barW * i, 0, barW * (i + 1), h, {colors[i], colors[i], colors[i], colors[i]});
+    }
+    else if (std::strcmp(name, "clear_blue") == 0)
+    {
+        clearTo(0xFF0040FF);
+    }
+    else if (std::strcmp(name, "clear_magenta") == 0)
+    {
+        clearTo(0xFFFF00FF);
+    }
+    else if (std::strcmp(name, "quad2d") == 0)
+    {
+        clearTo(0xFF000000);
+        drawQuad(0, 0, w, h, {0xFF000080, 0xFF000080, 0xFF000080, 0xFF000080});
+        const float m = 0.25f;
+        drawQuad(w * m, h * m, w * (1 - m), h * (1 - m), {0xFFCC0000, 0xFFCC0000, 0xFFCC0000, 0xFFCC0000});
+    }
+}
+
+void EngineMTL::SetDebugFlatColor(bool enable)
+{
+    if (_debugFlatColor == enable)
+        return;
+    _debugFlatColor = enable;
+    _tlFrameValid = false;
 }
 
 void EngineMTL::PixelToNDC(float px, float py, float& ndcX, float& ndcY) const
@@ -943,7 +1031,7 @@ void EngineMTL::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelT
         _tlFrame.fogParams[0] = fogStart;
         _tlFrame.fogParams[1] = (fogEnd > fogStart) ? 1.0f / (fogEnd - fogStart) : 0.0f;
         _tlFrame.fogParams[2] = 1.0f;
-        _tlFrame.fogParams[3] = 0.0f;
+        _tlFrame.fogParams[3] = _debugFlatColor ? 1.0f : 0.0f;
         _tlFrame.fogColor[0] = _fogColor.R();
         _tlFrame.fogColor[1] = _fogColor.G();
         _tlFrame.fogColor[2] = _fogColor.B();

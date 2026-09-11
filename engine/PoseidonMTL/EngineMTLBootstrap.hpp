@@ -63,7 +63,7 @@ struct FrameConstantsMTL
     Mat4RowsMTL view;          // rotation only, translation zeroed (camera-relative)
     Mat4RowsMTL projection;    // camera projection (with z-bias already folded in)
     float sunDirAndEnabled[4]; // xyz = direction, w = 1.0/0.0 enabled
-    float fogParams[4];        // start, invRange, enabled, 0
+    float fogParams[4];        // start, invRange, enabled, debugFlatColor (GL33 parks it in alphaRef.w)
     float fogColor[4];         // rgb, a=1
     // GL33 water constants: xyz = LightSun::SunDirection(), w = animation time.
     // This occupies the formerly-unused GL33 camPos-compatible tail slot.
@@ -170,6 +170,15 @@ class EngineMTLBootstrap
     void OnWindowResized(int width, int height);
     int DrawableWidth() const;
     int DrawableHeight() const;
+
+    // True between BeginFrame() and its matching EndFrame().
+    bool FrameOpen() const;
+
+    // Command buffers that complete with an error, counted since startup,
+    // and the most recent error's description. The GL33 analogue is its
+    // KHR_debug error tally, which Trident diffs across a test.
+    unsigned DebugErrorCount() const;
+    std::string LastDebugMessage() const;
 
     void Shutdown();
 

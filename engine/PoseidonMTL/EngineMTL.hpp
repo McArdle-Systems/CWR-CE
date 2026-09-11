@@ -220,9 +220,14 @@ class EngineMTL : public Engine
     int AFrameTime() const override;
 
     void Screenshot(RString filename) override { _pendingScreenshotPath = static_cast<const char*>(filename); }
-    void FlushPendingScreenshot() override {}
+    void FlushPendingScreenshot() override;
     int SampleBackBufferNonBlack() override;
     bool SamplePixel(int x, int y, uint8_t* outRGB) override;
+    void DrawTestPattern(const char* name) override;
+    void SetDebugFlatColor(bool enable) override;
+    bool GetDebugFlatColor() const override { return _debugFlatColor; }
+    unsigned int GetDebugErrorCount() const override { return _bootstrap.DebugErrorCount(); }
+    std::string GetLastDebugMessage() const override { return _bootstrap.LastDebugMessage(); }
 
   private:
     static constexpr int kGuardBand = 1024 * 4;
@@ -248,6 +253,13 @@ class EngineMTL : public Engine
     std::vector<uint8_t> _lastFrameRGB;
     int _lastFrameWidth = 0;
     int _lastFrameHeight = 0;
+    bool _debugFlatColor = false;
+
+    // Presents the bootstrap frame (with readback when enabled). NextFrame's
+    // normal path; the Trident samplers also call it so a frame that has
+    // been FinishDraw'n but not yet presented is what gets sampled, matching
+    // GL33's read-before-swap semantics.
+    void PresentFrame();
 
     TextBankMTL* _textBank = nullptr;
 
