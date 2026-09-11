@@ -16,6 +16,7 @@
 #include <Poseidon/Graphics/Rendering/Lighting/Lights.hpp>
 #include <Poseidon/World/Scene/Scene.hpp>
 #include <Poseidon/World/Scene/Camera/Camera.hpp>
+#include <PoseidonGL33/GL33LightIndices.hpp>
 #include <PoseidonMTL/TextBankMTL.hpp>
 #include <PoseidonMTL/TextureMTL.hpp>
 #include <PoseidonMTL/VertexBufferMTL.hpp>
@@ -611,6 +612,8 @@ void EngineMTL::DrawLine(const Line2DAbs& line, PackedColor c0, PackedColor c1, 
 
 void EngineMTL::DrawIndexedFan3D(const VertexIndex* indices, int n)
 {
+    if (_instCount > 1)
+        _instImpure = true; // vertex-soup geometry can't be instanced -- run must fall back
     if (_mesh == nullptr || n < 3 || n > kMaxPolyVerts)
         return;
 
@@ -774,12 +777,21 @@ void EngineMTL::SetMaterial(const TLMaterial& mat, const LightList& lights, cons
     if (render::Has(spec.material, render::Material::DisableSun))
         night = 1.0f;
 
+    const Color matDif = mat.diffuse * night;
+    const Color matAmb = mat.ambient * night;
+    _tlObject.matDiffuseRaw[0] = matDif.R();
+    _tlObject.matDiffuseRaw[1] = matDif.G();
+    _tlObject.matDiffuseRaw[2] = matDif.B();
+    _tlObject.matDiffuseRaw[3] = 0.0f;
+    _tlObject.matAmbientRaw[0] = matAmb.R();
+    _tlObject.matAmbientRaw[1] = matAmb.G();
+    _tlObject.matAmbientRaw[2] = matAmb.B();
+    _tlObject.matAmbientRaw[3] = 0.0f;
+
     int n = 0;
     if (night > 0.0f && GScene->GetCamera() != nullptr)
     {
         const Vector3 camPos = GScene->GetCamera()->Position();
-        const Color matDif = mat.diffuse * night;
-        const Color matAmb = mat.ambient * night;
         for (int i = 0; i < lights.Size() && n < kMaxLocalLightsMTL; i++)
         {
             Light* light = lights[i];
@@ -1124,6 +1136,89 @@ void EngineMTL::DrawSectionTL(const Shape& sMesh, int beg, int end)
 void EngineMTL::FlushQueues()
 {
     _bootstrap.FlushTriangles2D();
+}
+
+// Ported from EngineGL33::UploadLocalLights: raw light colours, positions
+// camera-relative to match the world matrices. The scalar path keeps its
+// per-object pre-multiplied lights (SetMaterial); only instanced runs read
+// this table.
+void EngineMTL::UploadLocalLights(const LightList& aLights)
+{
+    _localLightIndices.clear();
+    LocalLightTableMTL table = {};
+    Vector3 camPos = VZero;
+    if (GScene != nullptr && GScene->GetCamera() != nullptr)
+        camPos = GScene->GetCamera()->Position();
+
+    int n = 0;
+    for (int i = 0; i < aLights.Size() && n < kMaxLightTableMTL; i++)
+    {
+        Light* light = aLights[i];
+        if (!light)
+            continue;
+        LightDescription desc;
+        light->GetDescription(desc);
+        const bool isSpot = desc.type == LTSpotLight;
+        if (desc.type != LTPoint && !isSpot)
+            continue;
+
+        _localLightIndices[light] = n;
+        LightMTL& l = table.lights[n];
+        l.posAndAtten[0] = static_cast<float>(desc.pos.X() - camPos.X());
+        l.posAndAtten[1] = static_cast<float>(desc.pos.Y() - camPos.Y());
+        l.posAndAtten[2] = static_cast<float>(desc.pos.Z() - camPos.Z());
+        l.posAndAtten[3] = desc.startAtten;
+        Vector3 beam = desc.dir;
+        beam.Normalize();
+        l.dirAndIsSpot[0] = static_cast<float>(beam.X());
+        l.dirAndIsSpot[1] = static_cast<float>(beam.Y());
+        l.dirAndIsSpot[2] = static_cast<float>(beam.Z());
+        l.dirAndIsSpot[3] = isSpot ? 1.0f : 0.0f;
+        l.diffuse[0] = desc.diffuse.R();
+        l.diffuse[1] = desc.diffuse.G();
+        l.diffuse[2] = desc.diffuse.B();
+        l.ambient[0] = desc.ambient.R();
+        l.ambient[1] = desc.ambient.G();
+        l.ambient[2] = desc.ambient.B();
+        n++;
+    }
+    table.count[0] = static_cast<float>(n);
+    _bootstrap.UploadLocalLightTable(table);
+}
+
+bool EngineMTL::InstancedRunAdd(const Matrix4& modelToWorld, const LightList& lights)
+{
+    if (_instPending >= kMaxInstancesMTL || GScene == nullptr || GScene->GetCamera() == nullptr)
+        return false;
+    InstanceMTL& inst = _instArray[_instPending];
+    GfxMatrix world;
+    ConvertMatrix(world, modelToWorld);
+    const Vector3 camPos = GScene->GetCamera()->Position();
+    world._41 -= static_cast<float>(camPos.X());
+    world._42 -= static_cast<float>(camPos.Y());
+    world._43 -= static_cast<float>(camPos.Z());
+    std::memcpy(inst.world.m, &world, sizeof(world));
+
+    int idx[GL33LightIndices::Capacity];
+    int n = 0;
+    for (int i = 0; i < lights.Size() && n < GL33LightIndices::Capacity; i++)
+    {
+        auto it = _localLightIndices.find(lights[i]);
+        if (it != _localLightIndices.end())
+            idx[n++] = it->second;
+    }
+    const auto packed = GL33LightIndices::Pack(idx, n);
+    std::memcpy(inst.lightIdx, packed.data(), sizeof(inst.lightIdx));
+    ++_instPending;
+    return true;
+}
+
+void EngineMTL::BeginInstancedRunUpload()
+{
+    _bootstrap.UploadInstances(_instArray, _instPending);
+    _instCount = _bootstrap.InstanceCount();
+    // A failed upload draws the head alone; impure makes the scene redraw the tail.
+    _instImpure = _instCount < _instPending;
 }
 
 void EngineMTL::DrawPolygon(const VertexIndex* i, int n)

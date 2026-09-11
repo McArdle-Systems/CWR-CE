@@ -125,6 +125,34 @@ struct ObjectConstantsMTL
     // Per-object IsColored tint + opacity (GScene->GetConstantColor()); white
     // for everything else. Same slot as GL33's PSConstants::SlotConstColor.
     float constColor[4];
+    // Instanced runs read their world matrix and light selection from the
+    // InstanceMTL array instead of `world`/`lights` above; x = 1.0 when so.
+    float instanced[4];
+    // Raw material diffuse/ambient already scaled by the night effect --
+    // the instanced light path multiplies the frame light table by these
+    // in the shader (GL33's matDiffuseRaw/matAmbientRaw), where the scalar
+    // path pre-multiplies on the CPU into `lights`.
+    float matDiffuseRaw[4];
+    float matAmbientRaw[4];
+};
+
+// One instance of an instanced run: camera-relative world matrix plus the
+// GL33LightIndices packing of which frame-table lights apply to it.
+struct InstanceMTL
+{
+    Mat4RowsMTL world;
+    uint32_t lightIdx[4];
+};
+
+constexpr int kMaxInstancesMTL = 256;    // matches GL33's WorldInstances UBO
+constexpr int kMaxLightTableMTL = 64;    // matches GL33's LocalLights UBO
+
+// The view's active local lights for the frame (EngineMTL::UploadLocalLights),
+// raw light colours, positions camera-relative.
+struct LocalLightTableMTL
+{
+    float count[4]; // x = active count
+    LightMTL lights[kMaxLightTableMTL];
 };
 
 // Native Metal device/layer/queue wrapper (macOS / Apple Silicon). Used two
@@ -457,6 +485,16 @@ class EngineMTLBootstrap
                        Poseidon::render::DepthMode depthMode, Poseidon::render::BlendMode blendMode,
                        Poseidon::render::SamplerMode sampler, Poseidon::render::SurfaceMode surface,
                        Poseidon::render::ShaderFamily shader);
+
+    // Instanced runs (Engine::InstancedRunAdd/BeginInstancedRunUpload): the
+    // instance array and light table live in a per-frame stream buffer, so
+    // both uploads are valid until EndFrame. While `count` > 1 every
+    // DrawSectionTL draws that many instances; EndInstancedRun() drops back
+    // to scalar draws.
+    void UploadLocalLightTable(const LocalLightTableMTL& table);
+    void UploadInstances(const InstanceMTL* instances, int count);
+    void EndInstancedRun();
+    int InstanceCount() const;
 
   private:
     bool SetupDevice(); // shared by Init() and AttachToWindow()

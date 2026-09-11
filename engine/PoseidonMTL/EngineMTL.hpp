@@ -5,9 +5,12 @@
 #include <PoseidonGL33/SDLEventWindow.hpp>
 #include <PoseidonMTL/EngineMTLBootstrap.hpp>
 
+#include <unordered_map>
+
 namespace Poseidon
 {
 
+class Light;
 class TextBankMTL;
 class VertexBufferMTL;
 
@@ -199,6 +202,25 @@ class EngineMTL : public Engine
     void DrawSectionTL(const Shape& sMesh, int beg, int end) override;
     void FlushQueues() override;
 
+    // Instanced runs -- GL33's design (EngineGL33_Mesh.cpp): the scene
+    // accumulates a sorted run of identical static shapes, the head draws
+    // once and every DrawSectionTL inside the run renders all K instances.
+    // Legacy (vertex-soup) emission inside the run marks it impure so the
+    // scene redraws the tail scalar. Lights come from the frame table
+    // UploadLocalLights builds, selected per instance by index.
+    void UploadLocalLights(const LightList& aLights) override;
+    void InstancedRunReset() override { _instPending = 0; }
+    bool InstancedRunAdd(const Matrix4& modelToWorld, const LightList& lights) override;
+    void BeginInstancedRunUpload() override;
+    bool EndInstancedRun() override
+    {
+        const bool pure = !_instImpure;
+        _instCount = 0;
+        _bootstrap.EndInstancedRun();
+        return pure;
+    }
+    bool InstancedRunActive() const override { return _instCount > 1; }
+
     // No BeginShadowPass/EndShadowPass override: GL33's versions only flush
     // its batched-draw queue (EngineGL33_Draw.cpp). Metal's queued 2D draws
     // are drained by FlushQueues()/state-changing draw boundaries.
@@ -380,6 +402,13 @@ class EngineMTL : public Engine
     render::SamplerMode _tlSectionSampler = {render::SamplerFilter::Linear, false, false};
     bool _sunEnabled = false;
     float _grassParams[4] = {};
+
+    InstanceMTL _instArray[kMaxInstancesMTL] = {};
+    int _instPending = 0;
+    int _instCount = 0;
+    bool _instImpure = false;
+    // Light -> index into this frame's light table, rebuilt by UploadLocalLights.
+    std::unordered_map<const Light*, int> _localLightIndices;
 
     void CreateWindowAndDevice();
 

@@ -31,6 +31,7 @@
 
 namespace Poseidon
 {
+extern int gPerfDrawCalls;
 
 namespace
 {
@@ -230,6 +231,22 @@ struct ObjectConstants {
     float4 specular;    // rgb + power(w) -- sun-direction-only highlight
     float4 specEnabled; // x = 1.0/0.0
     float4 constColor;  // IsColored tint + opacity, white otherwise
+    float4 instanced;   // x = 1.0 when world/lights come from the Instance array
+    float4 matDiffuseRaw; // material diffuse * night, for the light-table path
+    float4 matAmbientRaw; // material ambient * night, for the light-table path
+};
+
+// Per-instance data for instanced runs (InstanceMTL). lightIdx packs up to
+// 8 light-table indices as bytes in .x/.y with the count in .z -- the same
+// GL33LightIndices layout GL33's LightIndices UBO uses.
+struct Instance {
+    Mat4Rows world;
+    uint4 lightIdx;
+};
+
+struct LocalLightTable {
+    float4 count;
+    LocalLight lights[64];
 };
 
 static inline float4 mulRowVec4(float4 p, Mat4Rows m)
@@ -242,6 +259,44 @@ static inline float3 mulRowVec3(float3 p, Mat4Rows m)
 {
     return float3(p.x * m.r0.x + p.y * m.r1.x + p.z * m.r2.x, p.x * m.r0.y + p.y * m.r1.y + p.z * m.r2.y,
                   p.x * m.r0.z + p.y * m.r1.z + p.z * m.r2.z);
+}
+
+// One local light's per-vertex contribution -- ported from GL33's loop in
+// s_vsTransformGLSL. Quadratic falloff past startAtten (cut at 100x);
+// spotlights gate by a cone factor: full inside cos 8deg, zero outside
+// cos 12deg, linear in cos^2 between.
+static inline float3 localLightContrib(LocalLight l, float3 worldPos, float3 worldNorm)
+{
+    constexpr float kMinInside2 = 0.95677279; // (cos 12deg)^2
+    constexpr float kMaxInside2 = 0.98063081; // (cos 8deg)^2
+    float3 toLight = l.posAndAtten.xyz - worldPos;
+    float size2 = dot(toLight, toLight);
+    float startAtten2 = l.posAndAtten.w * l.posAndAtten.w;
+    float endAtten2 = startAtten2 * 100.0;
+    if (size2 >= endAtten2)
+        return float3(0.0);
+
+    float cone = 1.0;
+    if (l.dirAndIsSpot.w > 0.5)
+    {
+        // inside = (vertex - light) . beamDir; cos^2(angleFromAxis) = inside^2/size2
+        float inside = -dot(toLight, l.dirAndIsSpot.xyz);
+        if (inside <= 0.0)
+            return float3(0.0);
+        float cos2 = (inside * inside) / size2;
+        if (cos2 < kMinInside2)
+            return float3(0.0);
+        cone = clamp((cos2 - kMinInside2) / (kMaxInside2 - kMinInside2), 0.0, 1.0);
+    }
+
+    float atten = (size2 >= startAtten2) ? (startAtten2 / size2) : 1.0;
+    float cosFi = dot(toLight, worldNorm);
+    if (cosFi > 0.0)
+    {
+        cosFi *= rsqrt(size2);
+        return (l.diffuse.rgb * cosFi + l.ambient.rgb) * (atten * cone);
+    }
+    return l.ambient.rgb * atten;
 }
 
 struct VSOutMesh {
@@ -259,17 +314,23 @@ struct VSOutMesh {
     float detailMode; // obj.flags.y: 0 normal, 1 detail, 2 grass
 };
 
-vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [[buffer(0)]],
-                        constant ObjectConstants& obj [[buffer(1)]], constant FrameConstants& frame [[buffer(2)]])
+vertex VSOutMesh vsMesh(uint vid [[vertex_id]], uint iid [[instance_id]],
+                        const device VertexMesh* verts [[buffer(0)]], constant ObjectConstants& obj [[buffer(1)]],
+                        constant FrameConstants& frame [[buffer(2)]], const device Instance* instances [[buffer(3)]],
+                        constant LocalLightTable& lightTable [[buffer(4)]])
 {
     VertexMesh v = verts[vid];
+    Instance inst = instances[iid];
+    Mat4Rows world = obj.world;
+    if (obj.instanced.x > 0.5)
+        world = inst.world;
 
     // World transform is already camera-relative (translation has the
     // camera position subtracted on the CPU side), so the result here is
     // directly usable as a camera-relative distance for fog, with no
     // separate view-space step needed for that.
-    float4 worldPos4 = mulRowVec4(float4(v.pos, 1.0), obj.world);
-    float3 worldNorm = normalize(mulRowVec3(v.norm, obj.world));
+    float4 worldPos4 = mulRowVec4(float4(v.pos, 1.0), world);
+    float3 worldNorm = normalize(mulRowVec3(v.norm, world));
 
     float4 viewPos = mulRowVec4(worldPos4, frame.view);
     float4 clipPos = mulRowVec4(viewPos, frame.projection);
@@ -309,44 +370,27 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [
     // in ordinary daytime scenes -- matches GL33 exactly, not a Metal-only
     // simplification. Spotlights additionally gate by a cone factor: full
     // inside cos 8deg, zero outside cos 12deg, linear in cos^2 between.
-    constexpr float kMinInside2 = 0.95677279; // (cos 12deg)^2
-    constexpr float kMaxInside2 = 0.98063081; // (cos 8deg)^2
-    int nLights = int(obj.lightCount.x);
-    for (int i = 0; i < nLights; i++)
+    if (obj.instanced.x > 0.5)
     {
-        float3 toLight = obj.lights[i].posAndAtten.xyz - worldPos4.xyz;
-        float size2 = dot(toLight, toLight);
-        float startAtten2 = obj.lights[i].posAndAtten.w * obj.lights[i].posAndAtten.w;
-        float endAtten2 = startAtten2 * 100.0;
-        if (size2 >= endAtten2)
-            continue;
-
-        float cone = 1.0;
-        if (obj.lights[i].dirAndIsSpot.w > 0.5)
+        // Instanced: the frame light table selected per instance, raw light
+        // colours scaled by the night-adjusted material here (GL33's
+        // localLights/lightIdx path).
+        uint4 li = inst.lightIdx;
+        int nLights = int(li.z);
+        for (int i = 0; i < nLights; i++)
         {
-            // inside = (vertex - light) . beamDir; cos^2(angleFromAxis) = inside^2/size2
-            float inside = -dot(toLight, obj.lights[i].dirAndIsSpot.xyz);
-            if (inside <= 0.0)
-                continue;
-            float cos2 = (inside * inside) / size2;
-            if (cos2 < kMinInside2)
-                continue;
-            cone = clamp((cos2 - kMinInside2) / (kMaxInside2 - kMinInside2), 0.0, 1.0);
+            uint idx = ((i < 4 ? li.x : li.y) >> (8u * uint(i & 3))) & 0xFFu;
+            LocalLight l = lightTable.lights[idx];
+            l.diffuse.rgb *= obj.matDiffuseRaw.rgb;
+            l.ambient.rgb *= obj.matAmbientRaw.rgb;
+            lit += localLightContrib(l, worldPos4.xyz, worldNorm);
         }
-
-        float atten = (size2 >= startAtten2) ? (startAtten2 / size2) : 1.0;
-        float cosFi = dot(toLight, worldNorm);
-        float3 contrib;
-        if (cosFi > 0.0)
-        {
-            cosFi *= rsqrt(size2);
-            contrib = (obj.lights[i].diffuse.rgb * cosFi + obj.lights[i].ambient.rgb) * (atten * cone);
-        }
-        else
-        {
-            contrib = obj.lights[i].ambient.rgb * atten;
-        }
-        lit += contrib;
+    }
+    else
+    {
+        int nLights = int(obj.lightCount.x);
+        for (int i = 0; i < nLights; i++)
+            lit += localLightContrib(obj.lights[i], worldPos4.xyz, worldNorm);
     }
     lit = clamp(lit, 0.0, 1.0);
 
@@ -544,11 +588,15 @@ fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& 
 // the same distance-fade here (and to fsShadow, or thread a fog factor
 // through ObjectConstants) so Metal's two paths agree even where GL33's own
 // don't, rather than only matching GL33's existing inconsistency.
-vertex VSOutMesh vsShadow(uint vid [[vertex_id]], const device VertexMesh* verts [[buffer(0)]],
-                          constant ObjectConstants& obj [[buffer(1)]], constant FrameConstants& frame [[buffer(2)]])
+vertex VSOutMesh vsShadow(uint vid [[vertex_id]], uint iid [[instance_id]],
+                          const device VertexMesh* verts [[buffer(0)]], constant ObjectConstants& obj [[buffer(1)]],
+                          constant FrameConstants& frame [[buffer(2)]], const device Instance* instances [[buffer(3)]])
 {
     VertexMesh v = verts[vid];
-    float4 worldPos4 = mulRowVec4(float4(v.pos, 1.0), obj.world);
+    Mat4Rows world = obj.world;
+    if (obj.instanced.x > 0.5)
+        world = instances[iid].world;
+    float4 worldPos4 = mulRowVec4(float4(v.pos, 1.0), world);
     float4 viewPos = mulRowVec4(worldPos4, frame.view);
     float4 clipPos = mulRowVec4(viewPos, frame.projection);
 
@@ -825,6 +873,50 @@ struct EngineMTLBootstrap::Impl
     size_t queued2DVertexBufferUsed = 0;
     size_t queued2DIndexBufferUsed = 0;
     std::vector<MTL::Buffer*> pending2DBufferRelease[2];
+
+    // Per-frame stream buffer for instanced-run data (instance arrays + the
+    // local light table): append-only, retired through pending2DBufferRelease
+    // at EndFrame like the queued-2D buffers. The current run/table keep
+    // their own (buffer, offset) since a grow can move the stream on.
+    MTL::Buffer* streamBuffer = nullptr;
+    size_t streamBufferBytes = 0;
+    size_t streamBufferUsed = 0;
+    MTL::Buffer* instanceBuffer = nullptr;
+    size_t instanceOffset = 0;
+    int instanceCount = 0;
+    MTL::Buffer* lightTableBuffer = nullptr;
+    size_t lightTableOffset = 0;
+    // Bound in place of the above for scalar draws: one identity instance
+    // and an empty light table, so the vertex stage always has valid buffers.
+    MTL::Buffer* fallbackInstance = nullptr;
+    MTL::Buffer* fallbackLightTable = nullptr;
+
+    bool StreamAlloc(size_t bytes, MTL::Buffer*& outBuffer, size_t& outOffset)
+    {
+        constexpr size_t kAlign = 256;
+        const size_t start = (streamBufferUsed + kAlign - 1) & ~(kAlign - 1);
+        if (streamBuffer == nullptr || start + bytes > streamBufferBytes)
+        {
+            if (streamBuffer != nullptr)
+                pending2DBufferRelease[destroyGeneration].push_back(streamBuffer);
+            size_t newBytes = streamBufferBytes > 0 ? streamBufferBytes * 2 : 256 * 1024;
+            if (newBytes < bytes)
+                newBytes = bytes;
+            streamBuffer = device->newBuffer(static_cast<NS::UInteger>(newBytes), MTL::ResourceStorageModeShared);
+            streamBufferBytes = streamBuffer != nullptr ? newBytes : 0;
+            streamBufferUsed = 0;
+            if (streamBuffer == nullptr)
+                return false;
+            outBuffer = streamBuffer;
+            outOffset = 0;
+            streamBufferUsed = bytes;
+            return true;
+        }
+        outBuffer = streamBuffer;
+        outOffset = start;
+        streamBufferUsed = start + bytes;
+        return true;
+    }
 
     // Open between BeginFrame/EndFrame.
     CA::MetalDrawable* currentDrawable = nullptr;
@@ -1761,6 +1853,13 @@ void EngineMTLBootstrap::EnsureFallbackResources()
 
     const uint8_t whitePixel[4] = {255, 255, 255, 255};
     _impl->fallbackWhite->replaceRegion(MTL::Region::Make2D(0, 0, 1, 1), 0, whitePixel, 4);
+
+    InstanceMTL identity = {};
+    identity.world.m[0] = identity.world.m[5] = identity.world.m[10] = identity.world.m[15] = 1.0f;
+    _impl->fallbackInstance = _impl->device->newBuffer(&identity, sizeof(identity), MTL::ResourceStorageModeShared);
+    LocalLightTableMTL emptyTable = {};
+    _impl->fallbackLightTable =
+        _impl->device->newBuffer(&emptyTable, sizeof(emptyTable), MTL::ResourceStorageModeShared);
 }
 
 bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool clear, bool clearZ)
@@ -2086,6 +2185,7 @@ void EngineMTLBootstrap::FlushTriangles2D()
     _impl->currentEncoder->drawIndexedPrimitives(
         MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(_impl->queued2DIndices.size()), MTL::IndexTypeUInt16,
         _impl->queued2DIndexBuffer, static_cast<NS::UInteger>(indexOffset));
+    ++Poseidon::gPerfDrawCalls;
 
     _impl->queued2DActive = false;
     _impl->queued2DVertices.clear();
@@ -2235,6 +2335,16 @@ bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* scre
         _impl->queued2DIndexBufferBytes = 0;
         _impl->queued2DIndexBufferUsed = 0;
     }
+    if (_impl->streamBuffer != nullptr)
+    {
+        _impl->pending2DBufferRelease[_impl->destroyGeneration].push_back(_impl->streamBuffer);
+        _impl->streamBuffer = nullptr;
+        _impl->streamBufferBytes = 0;
+        _impl->streamBufferUsed = 0;
+    }
+    _impl->instanceBuffer = nullptr;
+    _impl->instanceCount = 0;
+    _impl->lightTableBuffer = nullptr;
 
     pool->release();
 
@@ -2407,17 +2517,79 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     scissor.height = static_cast<NS::UInteger>(_impl->frameHeight);
     _impl->currentEncoder->setScissorRect(scissor);
 
+    const bool instanced = _impl->instanceCount > 1 && _impl->instanceBuffer != nullptr;
+    ObjectConstantsMTL objDraw = obj;
+    objDraw.instanced[0] = instanced ? 1.0f : 0.0f;
+
     _impl->currentEncoder->setVertexBuffer(vbuf, 0, 0);
-    _impl->currentEncoder->setVertexBytes(&obj, sizeof(obj), 1);
+    _impl->currentEncoder->setVertexBytes(&objDraw, sizeof(objDraw), 1);
     _impl->currentEncoder->setVertexBytes(&frame, sizeof(frame), 2);
+    if (instanced)
+        _impl->currentEncoder->setVertexBuffer(_impl->instanceBuffer, _impl->instanceOffset, 3);
+    else
+        _impl->currentEncoder->setVertexBuffer(_impl->fallbackInstance, 0, 3);
+    if (_impl->lightTableBuffer != nullptr)
+        _impl->currentEncoder->setVertexBuffer(_impl->lightTableBuffer, _impl->lightTableOffset, 4);
+    else
+        _impl->currentEncoder->setVertexBuffer(_impl->fallbackLightTable, 0, 4);
     _impl->currentEncoder->setFragmentBytes(&frame, sizeof(frame), 0);
-    _impl->currentEncoder->setFragmentBytes(&obj, sizeof(obj), 1);
+    _impl->currentEncoder->setFragmentBytes(&objDraw, sizeof(objDraw), 1);
     _impl->currentEncoder->setFragmentTexture(tex, 0);
     _impl->currentEncoder->setFragmentTexture(secondaryTex, 1);
 
     const NS::UInteger offsetBytes = static_cast<NS::UInteger>(firstIndex) * sizeof(uint16_t);
-    _impl->currentEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(indexCount),
-                                                 MTL::IndexTypeUInt16, ibuf, offsetBytes);
+    if (instanced)
+        _impl->currentEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(indexCount),
+                                                     MTL::IndexTypeUInt16, ibuf, offsetBytes,
+                                                     static_cast<NS::UInteger>(_impl->instanceCount));
+    else
+        _impl->currentEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(indexCount),
+                                                     MTL::IndexTypeUInt16, ibuf, offsetBytes);
+    ++Poseidon::gPerfDrawCalls;
+}
+
+void EngineMTLBootstrap::UploadLocalLightTable(const LocalLightTableMTL& table)
+{
+    _impl->lightTableBuffer = nullptr;
+    if (_impl->device == nullptr || _impl->currentEncoder == nullptr)
+        return;
+    MTL::Buffer* buf = nullptr;
+    size_t offset = 0;
+    if (!_impl->StreamAlloc(sizeof(table), buf, offset))
+        return;
+    std::memcpy(static_cast<uint8_t*>(buf->contents()) + offset, &table, sizeof(table));
+    _impl->lightTableBuffer = buf;
+    _impl->lightTableOffset = offset;
+}
+
+void EngineMTLBootstrap::UploadInstances(const InstanceMTL* instances, int count)
+{
+    _impl->instanceBuffer = nullptr;
+    _impl->instanceCount = 0;
+    if (_impl->device == nullptr || _impl->currentEncoder == nullptr || instances == nullptr || count <= 0)
+        return;
+    if (count > kMaxInstancesMTL)
+        count = kMaxInstancesMTL;
+    const size_t bytes = static_cast<size_t>(count) * sizeof(InstanceMTL);
+    MTL::Buffer* buf = nullptr;
+    size_t offset = 0;
+    if (!_impl->StreamAlloc(bytes, buf, offset))
+        return;
+    std::memcpy(static_cast<uint8_t*>(buf->contents()) + offset, instances, bytes);
+    _impl->instanceBuffer = buf;
+    _impl->instanceOffset = offset;
+    _impl->instanceCount = count;
+}
+
+void EngineMTLBootstrap::EndInstancedRun()
+{
+    _impl->instanceBuffer = nullptr;
+    _impl->instanceCount = 0;
+}
+
+int EngineMTLBootstrap::InstanceCount() const
+{
+    return _impl->instanceCount;
 }
 
 int EngineMTLBootstrap::CreateTexture(int width, int height, const uint8_t* rgba)
@@ -2638,6 +2810,24 @@ void EngineMTLBootstrap::Shutdown()
         _impl->queued2DIndexBuffer = nullptr;
         _impl->queued2DIndexBufferBytes = 0;
         _impl->queued2DIndexBufferUsed = 0;
+    }
+    if (_impl->streamBuffer != nullptr)
+    {
+        _impl->streamBuffer->release();
+        _impl->streamBuffer = nullptr;
+        _impl->streamBufferBytes = 0;
+        _impl->streamBufferUsed = 0;
+    }
+    _impl->instanceBuffer = nullptr;
+    _impl->instanceCount = 0;
+    _impl->lightTableBuffer = nullptr;
+    for (MTL::Buffer** buf : {&_impl->fallbackInstance, &_impl->fallbackLightTable})
+    {
+        if (*buf != nullptr)
+        {
+            (*buf)->release();
+            *buf = nullptr;
+        }
     }
     for (std::vector<MTL::Buffer*>& pending : _impl->pending2DBufferRelease)
     {
