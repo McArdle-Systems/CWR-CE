@@ -187,6 +187,10 @@ class EngineMTLBootstrap
     void SetRenderScale(float scale); // 1..2
     float RenderScale() const;
     void SetGamma(float gamma);
+    // Frames that will be read back present without gamma: GL33's capture
+    // re-resolves the frame target over its gamma pass, so its screenshots
+    // and Trident samples are pre-gamma, and the tests are tuned to that.
+    void SetReadbackFrame(bool readback);
     bool SetVSync(bool enabled);
     bool VSync() const;
 

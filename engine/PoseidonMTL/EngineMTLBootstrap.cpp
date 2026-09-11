@@ -834,6 +834,7 @@ struct EngineMTLBootstrap::Impl
     MTL::RenderPipelineState* presentPipeline = nullptr;
     MTL::SamplerState* presentSampler = nullptr;
     bool resolvedThisFrame = false;
+    bool readbackFrame = false;
     bool vsync = true;
 
     // Two-generation deferred-destroy queue for mesh buffers -- see
@@ -1118,6 +1119,11 @@ void EngineMTLBootstrap::SetGamma(float gamma)
     _impl->gamma = gamma > 0.0f ? gamma : 1.0f;
 }
 
+void EngineMTLBootstrap::SetReadbackFrame(bool readback)
+{
+    _impl->readbackFrame = readback;
+}
+
 bool EngineMTLBootstrap::SetVSync(bool enabled)
 {
     if (_impl->layer == nullptr)
@@ -1288,7 +1294,7 @@ void EngineMTLBootstrap::ResolveToDrawable()
 
     if (_impl->presentPipeline != nullptr && _impl->frameColor != nullptr)
     {
-        const float invGamma = 1.0f / _impl->gamma;
+        const float invGamma = _impl->readbackFrame ? 1.0f : 1.0f / _impl->gamma;
         _impl->currentEncoder->setRenderPipelineState(_impl->presentPipeline);
         _impl->currentEncoder->setFragmentTexture(_impl->frameColor, 0);
         _impl->currentEncoder->setFragmentSamplerState(_impl->presentSampler, 0);

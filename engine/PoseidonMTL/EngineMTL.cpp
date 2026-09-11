@@ -218,6 +218,7 @@ void EngineMTL::InitDraw(bool clear, PackedColor color)
         return;
     }
 
+    _bootstrap.SetReadbackFrame(_tridentReadback || _pendingScreenshotPath.GetLength() > 0);
     bool began = _bootstrap.BeginFrame(color.R8() / 255.0f, color.G8() / 255.0f, color.B8() / 255.0f,
                                        color.A8() / 255.0f, clear, /*clearZ=*/true);
     if (!began)
