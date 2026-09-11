@@ -122,6 +122,9 @@ struct ObjectConstantsMTL
     // (mat.specularPower > 0), matching GL33's SelectPixelShaderSpecular split.
     float specular[4];    // rgb + power(w)
     float specEnabled[4]; // x = 1.0/0.0, rest unused
+    // Per-object IsColored tint + opacity (GScene->GetConstantColor()); white
+    // for everything else. Same slot as GL33's PSConstants::SlotConstColor.
+    float constColor[4];
 };
 
 // Native Metal device/layer/queue wrapper (macOS / Apple Silicon). Used two

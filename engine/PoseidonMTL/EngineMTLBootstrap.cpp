@@ -229,6 +229,7 @@ struct ObjectConstants {
     LocalLight lights[8];
     float4 specular;    // rgb + power(w) -- sun-direction-only highlight
     float4 specEnabled; // x = 1.0/0.0
+    float4 constColor;  // IsColored tint + opacity, white otherwise
 };
 
 static inline float4 mulRowVec4(float4 p, Mat4Rows m)
@@ -479,12 +480,12 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
         else if (coverage < kSolidCutoutCoverage)
             discard_fragment();
     }
-    float3 diffuseLit = texColor.rgb * in.color.rgb;
+    float3 diffuseLit = texColor.rgb * in.color.rgb * obj.constColor.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
     float3 finalColor = mix(applyNightEye(detailed.rgb, frame.nightEyeCoef), frame.fogColor.rgb, in.fogFactor);
     if (frame.fogParams.w > 0.5)
         return float4(1.0, 0.0, 0.0, 1.0);
-    return float4(finalColor, outAlpha >= 0.0 ? outAlpha : in.color.a * detailed.a);
+    return float4(finalColor, outAlpha >= 0.0 ? outAlpha : in.color.a * detailed.a * obj.constColor.a);
 }
 
 // Blend-pipeline fragment shader (blending enabled, pipelineStateTLBlend) --
@@ -509,12 +510,12 @@ fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& 
     // whenever ambient light is dim (dawn/dusk; see fsMeshOpaque's coverage comment).
     if (texColor.a < (18.0 / 255.0))
         discard_fragment();
-    float3 diffuseLit = texColor.rgb * in.color.rgb;
+    float3 diffuseLit = texColor.rgb * in.color.rgb * obj.constColor.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
     float3 finalColor = mix(applyNightEye(detailed.rgb, frame.nightEyeCoef), frame.fogColor.rgb, in.fogFactor);
     if (frame.fogParams.w > 0.5)
         return float4(1.0, 0.0, 0.0, 1.0);
-    return float4(finalColor, in.color.a * detailed.a);
+    return float4(finalColor, in.color.a * detailed.a * obj.constColor.a);
 }
 
 // Dedicated unlit vertex shader for shadow draws -- mirrors GL33's vsShadow

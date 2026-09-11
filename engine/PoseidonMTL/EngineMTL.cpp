@@ -673,13 +673,15 @@ void EngineMTL::PrepareTriangle(const MipInfo& mip, int specFlags)
     // world models, but their source art commonly contains graded alpha used
     // for row tinting/fades.  Reclassifying those pictures as the wheel's
     // near-opaque cutout makes unselected thumbnails black until highlighted.
-    // Optics overlays (weapon/vehicle optics models, RscObject binoculars)
-    // are stamped BestMipmap and drawn magnified across the screen; the
-    // near-opaque threshold below would discard everything but the core of
-    // their bilinear-filtered reticle lines, so they keep GL33's blend path.
-    const bool opticsOverlay = render::Has(spec.material, render::Material::BestMipmap);
+    // 3D UI overlays (cutObj/RscObject title effects, ControlObject) and
+    // optics models are drawn magnified across the screen; the near-opaque
+    // threshold below would discard everything but the core of their
+    // bilinear-filtered reticle lines and glass vignettes, so they keep
+    // GL33's blend path.
+    const bool screenSpaceOverlay = GetPassKindHint() == render::PassKindHint::ScreenSpace3D ||
+                                    render::Has(spec.material, render::Material::BestMipmap);
     const bool measuredCutout =
-        !_legacyMeshUiOverlay && !opticsOverlay && mip.IsOK() && mip._texture && mip._texture->IsTransparent();
+        !_legacyMeshUiOverlay && !screenSpaceOverlay && mip.IsOK() && mip._texture && mip._texture->IsTransparent();
     if (measuredCutout)
     {
         // Legacy model flags only say "has alpha". The decoded texture class
@@ -1070,6 +1072,16 @@ void EngineMTL::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelT
     world._42 -= static_cast<float>(camPos.Y());
     world._43 -= static_cast<float>(camPos.Z());
     std::memcpy(_tlObject.world.m, &world, sizeof(world));
+
+    // IsColored objects carry their opacity + fade in the scene constant
+    // colour (GL33's PrepareMeshTL does the same upload).
+    Color constColor = HWhite;
+    if (render::Has(spec.routing, render::Routing::IsColored))
+        constColor = GScene->GetConstantColor();
+    _tlObject.constColor[0] = constColor.R();
+    _tlObject.constColor[1] = constColor.G();
+    _tlObject.constColor[2] = constColor.B();
+    _tlObject.constColor[3] = constColor.A();
 
     _currentDrawItem.worldMatrix = world;
     _currentDrawItem.specFlags = spec;
