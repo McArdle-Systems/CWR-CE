@@ -1107,7 +1107,7 @@ struct EngineMTLBootstrap::Impl
     MTL::RenderPipelineState* shadowDepthPipeline = nullptr;
     MTL::RenderPipelineState* shadowDepthAlphaPipeline = nullptr;
     MTL::DepthStencilState* shadowDepthState = nullptr;
-    MTL::Texture* shadowCascadeArray = nullptr; // Depth32Float 2D array, sampled by the lit shaders
+    MTL::Texture* shadowCascadeArray = nullptr;  // Depth32Float 2D array, sampled by the lit shaders
     MTL::Texture* shadowFallbackArray = nullptr; // 1x1x1, bound when no map is active
     MTL::Texture* shadowProbeTarget = nullptr;   // single map for ShadowDepthProbe
     int shadowCascadeRes = 0;
@@ -3029,7 +3029,8 @@ bool EngineMTLBootstrap::ShadowDepthProbe(const float* lightVP16, const float* t
     const size_t vertBytes = static_cast<size_t>(vertCount) * 3 * sizeof(float);
     MTL::Buffer* verts = _impl->device->newBuffer(triXYZ, vertBytes, MTL::ResourceStorageModeShared);
     const size_t rowBytes = static_cast<size_t>(res) * sizeof(float);
-    MTL::Buffer* readback = _impl->device->newBuffer(rowBytes * static_cast<size_t>(res), MTL::ResourceStorageModeShared);
+    MTL::Buffer* readback =
+        _impl->device->newBuffer(rowBytes * static_cast<size_t>(res), MTL::ResourceStorageModeShared);
     if (verts == nullptr || readback == nullptr)
     {
         if (verts)
@@ -3079,7 +3080,8 @@ bool EngineMTLBootstrap::ReadShadowCascade0(std::vector<float>& outDepth, int& o
         return false;
     const int res = _impl->shadowCascadeRes;
     const size_t rowBytes = static_cast<size_t>(res) * sizeof(float);
-    MTL::Buffer* readback = _impl->device->newBuffer(rowBytes * static_cast<size_t>(res), MTL::ResourceStorageModeShared);
+    MTL::Buffer* readback =
+        _impl->device->newBuffer(rowBytes * static_cast<size_t>(res), MTL::ResourceStorageModeShared);
     if (readback == nullptr)
         return false;
     MTL::CommandBuffer* cmd = _impl->commandQueue->commandBuffer();
@@ -3100,8 +3102,8 @@ bool EngineMTLBootstrap::SetTerrainHeightmap(const float* heights, int width, in
 {
     if (_impl->device == nullptr || heights == nullptr || width <= 0 || height <= 0)
         return false;
-    if (_impl->heightMap != nullptr &&
-        (static_cast<int>(_impl->heightMap->width()) != width || static_cast<int>(_impl->heightMap->height()) != height))
+    if (_impl->heightMap != nullptr && (static_cast<int>(_impl->heightMap->width()) != width ||
+                                        static_cast<int>(_impl->heightMap->height()) != height))
     {
         _impl->heightMap->release(); // command buffers retain what their draws reference
         _impl->heightMap = nullptr;
@@ -3424,9 +3426,8 @@ void EngineMTLBootstrap::Shutdown()
     }
     _impl->shadowQueue = Impl::QueuedShadowPass{};
     _impl->shadowCascadeRendered = false;
-    for (MTL::Buffer** buf :
-         {&_impl->fallbackInstance, &_impl->fallbackLightTable, &_impl->lightTables[0], &_impl->lightTables[1],
-          &_impl->lightTables[2]})
+    for (MTL::Buffer** buf : {&_impl->fallbackInstance, &_impl->fallbackLightTable, &_impl->lightTables[0],
+                              &_impl->lightTables[1], &_impl->lightTables[2]})
     {
         if (*buf != nullptr)
         {

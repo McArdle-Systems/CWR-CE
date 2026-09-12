@@ -1189,11 +1189,10 @@ void EngineMTL::RenderShadowDepthScene(const float* lightVPs, const float* split
         batches.push_back({tex ? tex->GpuHandle() : 0, src.firstVertex, src.vertexCount});
     }
 
-    const bool queued = numCascades >= 1 &&
-                        _bootstrap.QueueShadowCascades(lightVPs, numCascades, res, casters.solidXYZ,
-                                                       casters.solidVertexCount, casters.alphaXYZUV,
-                                                       casters.alphaVertexCount, batches.data(),
-                                                       static_cast<int>(batches.size()));
+    const bool queued = numCascades >= 1 && _bootstrap.QueueShadowCascades(lightVPs, numCascades, res, casters.solidXYZ,
+                                                                           casters.solidVertexCount, casters.alphaXYZUV,
+                                                                           casters.alphaVertexCount, batches.data(),
+                                                                           static_cast<int>(batches.size()));
     if (!queued)
     {
         _shadowMapActive = false;
@@ -1224,7 +1223,8 @@ bool EngineMTL::DumpShadowMap(const char* path)
     for (size_t i = 0; i < gray.size(); i++)
     {
         const float d = depth[i];
-        gray[i] = (d >= 0.999f) ? static_cast<uint8_t>(35) : static_cast<uint8_t>((0.15f + (1.0f - d) * 0.85f) * 255.0f);
+        gray[i] =
+            (d >= 0.999f) ? static_cast<uint8_t>(35) : static_cast<uint8_t>((0.15f + (1.0f - d) * 0.85f) * 255.0f);
     }
     return PNGWriter::WritePNG(path, res, res, 1, gray.data());
 }

@@ -42,7 +42,8 @@ TEST_CASE("Metal cutouts preserve coverage without transparent depth writes", "[
     REQUIRE(legacyPrepareRegion.find("if (d.blend == render::BlendMode::AlphaBlend)") != std::string::npos);
     REQUIRE(legacyPrepareRegion.find("_currentTriDepthMode = render::DepthMode::ReadOnly;") != std::string::npos);
     REQUIRE(legacyPrepareRegion.find("mip._texture->IsTransparent()") != std::string::npos);
-    REQUIRE(legacyPrepareRegion.find("!_legacyMeshUiOverlay && !screenSpaceOverlay && mip.IsOK()") != std::string::npos);
+    REQUIRE(legacyPrepareRegion.find("!_legacyMeshUiOverlay && !screenSpaceOverlay && mip.IsOK()") !=
+            std::string::npos);
     REQUIRE(legacyPrepareRegion.find("_currentTriAlphaRef = 254;") != std::string::npos);
 
     const std::string bootstrap = ReadTextFile(repoRoot / "engine" / "PoseidonMTL" / "EngineMTLBootstrap.cpp");
