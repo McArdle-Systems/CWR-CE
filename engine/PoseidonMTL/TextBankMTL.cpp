@@ -14,10 +14,13 @@ TextBankMTL::~TextBankMTL()
 {
     UnlockAllTextures();
     DeleteAllAnimated();
-    // Individual GPU textures are not explicitly released here --
-    // EngineMTLBootstrap::Shutdown() (called right after this destructor, by
-    // EngineMTL's teardown order) releases every texture it owns
-    // unconditionally.
+    // Textures that outlive the bank must not call back into it; their
+    // surfaces go with EngineMTLBootstrap::Shutdown() instead.
+    for (int i = 0; i < _texture.Size(); i++)
+    {
+        if (TextureMTL* texture = _texture[i])
+            texture->SetBank(nullptr);
+    }
 }
 
 int TextBankMTL::Find(RStringB name) const
@@ -39,6 +42,7 @@ Ref<Texture> TextBankMTL::Load(RStringB name)
 
     TextureMTL* texture = new TextureMTL();
     texture->SetName(name);
+    texture->SetBank(this);
     texture->LoadPixels(*_bootstrap); // false on failure -- texture stays valid, renders as fallback white
 
     int iFree = _texture.Add();
@@ -62,6 +66,7 @@ Ref<Texture> TextBankMTL::LoadInterpolated(RStringB n1, RStringB n2, float facto
 
     TextureMTL* texture = new TextureMTL();
     texture->SetName(n1); // matches GL33's Copy(index1): the blend's identity is n1's
+    texture->SetBank(this);
     if (!texture->LoadPixelsInterpolated(*_bootstrap, n1, n2, factor))
     {
         delete texture;
@@ -127,6 +132,7 @@ MipInfo TextBankMTL::UseMipmap(Texture* texture, int level, int levelTop)
         return MipInfo(nullptr, 0);
 
     TextureMTL* mtlTexture = static_cast<TextureMTL*>(texture);
+    EnsureResident(mtlTexture);
     const int selectedLevel = mtlTexture->NoteMipmapUse(level, levelTop);
     if (!mtlTexture->EnsureBigSurface(*_bootstrap, *this, selectedLevel) && mtlTexture->HasBigSurface())
     {
@@ -147,6 +153,7 @@ Texture* TextBankMTL::CreateDynamic(int w, int h, const void* rgba, uint32_t /*s
     // accepted to match the interface but ignored, same simplification
     // LoadPixels already makes.
     TextureMTL* texture = new TextureMTL();
+    texture->SetBank(this);
     if (!texture->InitFromRGBA(*_bootstrap, w, h, rgba))
     {
         LOG_WARN(Graphics, "MTL: failed to create dynamic texture {}x{}", w, h);
@@ -192,11 +199,42 @@ void TextBankMTL::EnsureBudgetInitialized()
 
 void TextBankMTL::ReleaseAllTextures()
 {
-    _texture.Clear();
-    _bigSurfaceLRU.Clear();
-    _totalBigSurfaceBytes = 0;
+    for (int i = 0; i < _texture.Size(); i++)
+    {
+        if (TextureMTL* texture = _texture[i])
+            texture->ReleaseMemory(*_bootstrap, *this);
+    }
     _bootstrap->ClearTexturePool();
     _totalPooledBytes = 0;
+}
+
+void TextBankMTL::FlushBank(QFBank* bank)
+{
+    for (int i = 0; i < _texture.Size(); i++)
+    {
+        TextureMTL* texture = _texture[i];
+        if (!texture || !bank->FileExists(texture->GetName()))
+            continue;
+        _texture.Delete(i);
+        i--;
+    }
+}
+
+void TextBankMTL::EnsureResident(TextureMTL* texture)
+{
+    if (texture != nullptr && texture->NeedsReload())
+        texture->LoadPixels(*_bootstrap);
+}
+
+void TextBankMTL::OnTextureDestroyed(TextureMTL& texture)
+{
+    if (texture.HasBigSurface())
+    {
+        _totalBigSurfaceBytes -= texture.BigSurfaceBytes();
+        texture.EvictBigSurface(*_bootstrap);
+    }
+    if (const int small = texture.SmallGpuHandle())
+        _bootstrap->DestroyTexture(small);
 }
 
 void TextBankMTL::ReleaseDetailTextures()

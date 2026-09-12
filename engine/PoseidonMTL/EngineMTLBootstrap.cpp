@@ -11,8 +11,12 @@
 #include <SDL3/SDL_metal.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 // Log.hpp itself only pulls in <spdlog/spdlog.h> -- it does NOT transitively
@@ -27,6 +31,7 @@
 
 namespace Poseidon
 {
+extern int gPerfDrawCalls;
 
 namespace
 {
@@ -83,7 +88,8 @@ fragment float4 fs2d(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
                      texture2d<float> detailTex [[texture(1)]], sampler samp [[sampler(0)]],
                      sampler detailSamp [[sampler(1)]],
                      constant float4& fogColor [[buffer(0)]],
-                     constant float2& alphaTest [[buffer(1)]])
+                     constant float2& alphaTest [[buffer(1)]],
+                     constant float4& nightEyeCoef [[buffer(2)]])
 {
     float4 texColor = tex.sample(samp, in.uv);
     float4 lit = texColor * in.color;
@@ -100,6 +106,9 @@ fragment float4 fs2d(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
         float4 detail = detailTex.sample(detailSamp, in.uv1);
         lit.rgb *= detail.a * 2.0;
     }
+    float luminance = saturate(dot(lit.rgb, nightEyeCoef.rgb));
+    float nightBlend = saturate(luminance + nightEyeCoef.a);
+    lit.rgb = mix(float3(luminance), lit.rgb, nightBlend);
     float3 rgb = mix(fogColor.rgb, lit.rgb, saturate(in.fogTC));
     return float4(rgb, lit.a);
 }
@@ -120,6 +129,34 @@ fragment float4 fs2dShadow(VSOut in [[stage_in]], texture2d<float> tex [[texture
     if (a < (1.0 / 255.0))
         discard_fragment();
     return float4(0.0, 0.0, 0.0, a);
+}
+)";
+
+// Present pass: fullscreen triangle sampling the offscreen frame target into
+// the drawable, applying GL33's pow(c, 1/gamma) on the way (its psGamma).
+const char* kShaderSourcePresent = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutPresent {
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex VSOutPresent vsPresent(uint vid [[vertex_id]])
+{
+    const float2 pos = float2((vid == 1) ? 3.0 : -1.0, (vid == 2) ? 3.0 : -1.0);
+    VSOutPresent out;
+    out.position = float4(pos, 0.0, 1.0);
+    out.uv = float2((pos.x + 1.0) * 0.5, 1.0 - (pos.y + 1.0) * 0.5);
+    return out;
+}
+
+fragment float4 fsPresent(VSOutPresent in [[stage_in]], texture2d<float> frame [[texture(0)]],
+                          sampler samp [[sampler(0)]], constant float& invGamma [[buffer(0)]])
+{
+    float4 c = frame.sample(samp, in.uv);
+    return float4(pow(max(c.rgb, 0.0), invGamma), 1.0);
 }
 )";
 
@@ -148,6 +185,8 @@ struct VertexMesh {
     packed_float3 pos;
     packed_float3 norm;
     float2 uv;
+    uint landClip; // 0 rigid, 1 ClipLandKeep, 2 ClipLandOn
+    uint pad;
 };
 
 struct Mat4Rows {
@@ -161,7 +200,24 @@ struct FrameConstants {
     float4 fogParams;
     float4 fogColor;
     float4 waterSunDirAndTime;
+    float4 nightEyeCoef;
+    float4 hmParams; // {invGrid, camX, camZ, camY}
+    float4 landGrid; // {invLandGrid, heightmap texels per land square, 0, 0}
+    float4 shadowCtl;      // {enable, 0, darkness, texelSize}
+    float4x4 cascadeVP[4]; // column-major, camera-relative
+    float4 cascadeSplits;  // per-tier select distance (omni: radius; frustum: far eye-depth)
+    float4 cascadeCtl;     // {count, fadeRange, biasBase, omniCount}
+    float4 camFwd;
 };
+
+// GL33's psNormal/psDetail night-eye term: pull colour toward luminance as
+// the eye's night response grows.
+static inline float3 applyNightEye(float3 rgb, float4 coef)
+{
+    float luminance = saturate(dot(rgb, coef.rgb));
+    float nightBlend = saturate(luminance + coef.a);
+    return mix(float3(luminance), rgb, nightBlend);
+}
 
 // One local point/spot light -- mirrors LightMTL (EngineMTLBootstrap.hpp)
 // field-for-field, ported from GL33's per-vertex lighting loop
@@ -179,10 +235,27 @@ struct ObjectConstants {
     float4 diffuse;
     float4 emissive;
     float4 flags; // x=cutout, y=shader mode, z/w=grass alpha coefficients
-    float4 lightCount; // x = active local-light count (0..8)
-    LocalLight lights[8];
+    uint4 lightIdx; // GL33LightIndices packing of frame-table lights
     float4 specular;    // rgb + power(w) -- sun-direction-only highlight
     float4 specEnabled; // x = 1.0/0.0
+    float4 constColor;  // IsColored tint + opacity, white otherwise
+    float4 instanced;   // x = 1.0 when world/lights come from the Instance array
+    float4 matDiffuseRaw; // material diffuse * night, for the light-table path
+    float4 matAmbientRaw; // material ambient * night, for the light-table path
+    float4 landClip;      // {boundingCenter.xyz, mode}
+};
+
+// Per-instance data for instanced runs (InstanceMTL). lightIdx packs up to
+// 8 light-table indices as bytes in .x/.y with the count in .z -- the same
+// GL33LightIndices layout GL33's LightIndices UBO uses.
+struct Instance {
+    Mat4Rows world;
+    uint4 lightIdx;
+};
+
+struct LocalLightTable {
+    float4 count;
+    LocalLight lights[64];
 };
 
 static inline float4 mulRowVec4(float4 p, Mat4Rows m)
@@ -195,6 +268,97 @@ static inline float3 mulRowVec3(float3 p, Mat4Rows m)
 {
     return float3(p.x * m.r0.x + p.y * m.r1.x + p.z * m.r2.x, p.x * m.r0.y + p.y * m.r1.y + p.z * m.r2.y,
                   p.x * m.r0.z + p.y * m.r1.z + p.z * m.r2.z);
+}
+
+// GPU land clip -- ported from GL33's s_vsTransformGLSL. Samples the terrain
+// height grid at absolute XZ and returns {height, dh/dx, dh/dz} of the
+// triangle the point falls in (the grid square's diagonal split matches
+// Landscape's CPU surface evaluation).
+static inline float4 heightCorners(texture2d<float> heightMap, int2 base, int stride)
+{
+    int2 sz = int2(heightMap.get_width(), heightMap.get_height());
+    int2 i0 = clamp(base, int2(0), sz - 1);
+    int2 i1 = clamp(base + int2(stride), int2(0), sz - 1);
+    return float4(heightMap.read(uint2(i0.x, i0.y)).r, heightMap.read(uint2(i1.x, i0.y)).r,
+                  heightMap.read(uint2(i0.x, i1.y)).r, heightMap.read(uint2(i1.x, i1.y)).r);
+}
+
+static inline float3 surfaceFromCorners(float4 c, float2 f, float invGrid)
+{
+    float h;
+    float2 grad;
+    if (f.x <= 1.0 - f.y)
+    {
+        h = c.x + (c.z - c.x) * f.y + (c.y - c.x) * f.x;
+        grad = float2(c.y - c.x, c.z - c.x);
+    }
+    else
+    {
+        h = c.z + (c.y - c.w) - (c.z - c.w) * f.x - (c.y - c.w) * f.y;
+        grad = float2(c.w - c.z, c.w - c.y);
+    }
+    return float3(h, grad * invGrid);
+}
+
+static inline float3 landClipSurface(texture2d<float> heightMap, float2 absXZ, float invGrid)
+{
+    float2 rel = absXZ * invGrid;
+    float2 base = floor(rel);
+    return surfaceFromCorners(heightCorners(heightMap, int2(base), 1), rel - base, invGrid);
+}
+
+// Mode 2: the whole object rides one land square's plane (the square under
+// the object origin), like the CPU ApplyLandClip's plane mode.
+static inline float3 landPlaneSurface(texture2d<float> heightMap, float2 absXZ, float2 objAbsXZ, float4 landGrid)
+{
+    float invLandGrid = landGrid.x;
+    int stride = int(landGrid.y);
+    float2 sq = floor(objAbsXZ * invLandGrid);
+    return surfaceFromCorners(heightCorners(heightMap, int2(sq) * stride, stride), absXZ * invLandGrid - sq,
+                              invLandGrid);
+}
+
+static inline float3 landClipNormal(float3 n, float3 surf)
+{
+    return normalize(float3(n.x - surf.y * n.y, n.y, n.z - surf.z * n.y));
+}
+
+// One local light's per-vertex contribution -- ported from GL33's loop in
+// s_vsTransformGLSL. Quadratic falloff past startAtten (cut at 100x);
+// spotlights gate by a cone factor: full inside cos 8deg, zero outside
+// cos 12deg, linear in cos^2 between.
+static inline float3 localLightContrib(LocalLight l, float3 worldPos, float3 worldNorm)
+{
+    constexpr float kMinInside2 = 0.95677279; // (cos 12deg)^2
+    constexpr float kMaxInside2 = 0.98063081; // (cos 8deg)^2
+    float3 toLight = l.posAndAtten.xyz - worldPos;
+    float size2 = dot(toLight, toLight);
+    float startAtten2 = l.posAndAtten.w * l.posAndAtten.w;
+    float endAtten2 = startAtten2 * 100.0;
+    if (size2 >= endAtten2)
+        return float3(0.0);
+
+    float cone = 1.0;
+    if (l.dirAndIsSpot.w > 0.5)
+    {
+        // inside = (vertex - light) . beamDir; cos^2(angleFromAxis) = inside^2/size2
+        float inside = -dot(toLight, l.dirAndIsSpot.xyz);
+        if (inside <= 0.0)
+            return float3(0.0);
+        float cos2 = (inside * inside) / size2;
+        if (cos2 < kMinInside2)
+            return float3(0.0);
+        cone = clamp((cos2 - kMinInside2) / (kMaxInside2 - kMinInside2), 0.0, 1.0);
+    }
+
+    float atten = (size2 >= startAtten2) ? (startAtten2 / size2) : 1.0;
+    float cosFi = dot(toLight, worldNorm);
+    if (cosFi > 0.0)
+    {
+        cosFi *= rsqrt(size2);
+        return (l.diffuse.rgb * cosFi + l.ambient.rgb) * (atten * cone);
+    }
+    return l.ambient.rgb * atten;
 }
 
 struct VSOutMesh {
@@ -210,19 +374,129 @@ struct VSOutMesh {
     float fogFactor;
     float isCutout; // obj.flags.x passed through -- see fsMeshOpaque
     float detailMode; // obj.flags.y: 0 normal, 1 detail, 2 grass
+    float3 worldRel;  // camera-relative world position for the cascade shadow lookup
 };
 
-vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [[buffer(0)]],
-                        constant ObjectConstants& obj [[buffer(1)]], constant FrameConstants& frame [[buffer(2)]])
+// Cascaded shadow-map factor -- ported from GL33's psNormal/psDetail/psGrass
+// kernel. The first omniCount tiers are camera-centred spheres selected by
+// 3D distance, the rest frustum slices selected by eye-depth; pick the
+// tightest tier, fall through to the first tier whose projection is in
+// bounds, 3x3-PCF it, cross-fade to the next tier over a band, fade at the
+// far edge and dim in fog. Returns the multiplier for the lit colour.
+// Depth texture rows run top-down here, so the projected y is flipped.
+static inline float shadowMapFactor(constant FrameConstants& frame, float3 worldRel, float fogFactor,
+                                    depth2d_array<float> shadowMap, sampler shadowSamp)
+{
+    if (frame.shadowCtl.x <= 0.5)
+        return 1.0;
+    int nC = int(frame.cascadeCtl.x);
+    int omniN = int(frame.cascadeCtl.w);
+    float eyeDepth = dot(worldRel, frame.camFwd.xyz);
+    float dist3D = length(worldRel);
+    int ci = nC;
+    for (int i = 0; i < 4; ++i)
+    {
+        if (i >= nC)
+            break;
+        float metric = (i < omniN) ? dist3D : eyeDepth;
+        if (metric <= frame.cascadeSplits[i])
+        {
+            ci = i;
+            break;
+        }
+    }
+    if (ci >= nC)
+        return 1.0;
+    float ts = frame.shadowCtl.w;
+    float prevEdge = (ci > 0) ? frame.cascadeSplits[ci - 1] : 0.0;
+    float ciMetric = (ci < omniN) ? dist3D : eyeDepth;
+    float band = (frame.cascadeSplits[ci] - prevEdge) * 0.15;
+    float bw = (ci + 1 < nC) ? clamp((ciMetric - (frame.cascadeSplits[ci] - band)) / max(band, 0.001), 0.0, 1.0)
+                             : 0.0;
+    float litSum = 0.0;
+    float wSum = 0.0;
+    for (int p = 0; p < 4; ++p)
+    {
+        int c = ci + p;
+        if (c >= nC)
+            break;
+        float w = (p == 0) ? (1.0 - bw) : ((wSum <= 0.0) ? 1.0 : ((p == 1) ? bw : 0.0));
+        if (w <= 0.0)
+            continue;
+        float4 cp = frame.cascadeVP[c] * float4(worldRel, 1.0);
+        float3 sc = cp.xyz / cp.w;
+        float2 suv = float2(sc.x * 0.5 + 0.5, 0.5 - sc.y * 0.5);
+        if (suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0 && sc.z > 0.0 && sc.z < 1.0)
+        {
+            float bias = frame.cascadeCtl.z * float(c + 1) * float(c + 1);
+            float lit = 0.0;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                    lit += (sc.z - bias > shadowMap.sample(shadowSamp, suv + float2(float(dx), float(dy)) * ts, c))
+                               ? 0.0
+                               : 1.0;
+            litSum += w * (lit / 9.0);
+            wSum += w;
+        }
+    }
+    if (wSum <= 0.0)
+        return 1.0;
+    float lit = litSum / wSum;
+    float lastSplit = frame.cascadeSplits[nC - 1];
+    float fade = clamp((lastSplit - eyeDepth) / max(frame.cascadeCtl.y, 0.001), 0.0, 1.0);
+    float strength = (1.0 - lit) * fade * (1.0 - fogFactor);
+    return mix(1.0, frame.shadowCtl.z, strength);
+}
+
+vertex VSOutMesh vsMesh(uint vid [[vertex_id]], uint iid [[instance_id]],
+                        const device VertexMesh* verts [[buffer(0)]], constant ObjectConstants& obj [[buffer(1)]],
+                        constant FrameConstants& frame [[buffer(2)]], const device Instance* instances [[buffer(3)]],
+                        constant LocalLightTable& lightTable [[buffer(4)]],
+                        texture2d<float> heightMap [[texture(0)]])
 {
     VertexMesh v = verts[vid];
+    Instance inst = instances[iid];
+    Mat4Rows world = obj.world;
+    if (obj.instanced.x > 0.5)
+        world = inst.world;
 
     // World transform is already camera-relative (translation has the
     // camera position subtracted on the CPU side), so the result here is
     // directly usable as a camera-relative distance for fog, with no
     // separate view-space step needed for that.
-    float4 worldPos4 = mulRowVec4(float4(v.pos, 1.0), obj.world);
-    float3 worldNorm = normalize(mulRowVec3(v.norm, obj.world));
+    float4 worldPos4 = mulRowVec4(float4(v.pos, 1.0), world);
+    float3 worldNorm = normalize(mulRowVec3(v.norm, world));
+
+    // Land clip on the GPU (Engine::LandClipInVS): the CPU skipped its
+    // ApplyLandClip deform, so snap here. frame.hmParams.yz re-adds the
+    // absolute camera XZ; .w removes the camera Y again from the sampled
+    // absolute height.
+    int lcMode = int(obj.landClip.w + 0.5);
+    float invGrid = frame.hmParams.x;
+    if (lcMode == 2 && frame.landGrid.y > 0.0)
+    {
+        float2 objAbsXZ = float2(world.r3.x, world.r3.z) + frame.hmParams.yz;
+        float3 surf = landPlaneSurface(heightMap, worldPos4.xz + frame.hmParams.yz, objAbsXZ, frame.landGrid);
+        worldPos4.y = surf.x + v.pos.y + obj.landClip.y - frame.hmParams.w;
+        worldNorm = landClipNormal(worldNorm, surf);
+    }
+    else if (lcMode == 1 && v.landClip != 0u && invGrid > 0.0)
+    {
+        float3 surf = landClipSurface(heightMap, worldPos4.xz + frame.hmParams.yz, invGrid);
+        if (v.landClip == 2u)
+        {
+            worldPos4.y = surf.x - frame.hmParams.w; // ClipLandOn: pin onto the surface
+        }
+        else
+        {
+            // ClipLandKeep: keep the authored height above the terrain at the
+            // object anchor (bounding centre), as Object::ApplyLandClip does.
+            float4 anchor = mulRowVec4(float4(-obj.landClip.xyz, 1.0), world);
+            float2 anchorXZ = anchor.xz + frame.hmParams.yz;
+            worldPos4.y = worldPos4.y + surf.x - landClipSurface(heightMap, anchorXZ, invGrid).x;
+        }
+        worldNorm = landClipNormal(worldNorm, surf);
+    }
 
     float4 viewPos = mulRowVec4(worldPos4, frame.view);
     float4 clipPos = mulRowVec4(viewPos, frame.projection);
@@ -255,51 +529,20 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [
     // DrawShadow comment), so there's no shadow-alpha regression risk here.
     float litAlpha = clamp(obj.ambient.w + NdotL * obj.diffuse.w + obj.emissive.w, 0.0, 1.0);
 
-    // Local point/spot lights (street lamps, vehicle headlights) -- ported
-    // from GL33's per-vertex loop (EngineGL33_Shaders.cpp's
-    // s_vsTransformGLSL). obj.lightCount.x is 0 whenever EngineMTL::
-    // SetMaterial's night-effect gate didn't pass, so this loop is a no-op
-    // in ordinary daytime scenes -- matches GL33 exactly, not a Metal-only
-    // simplification. Spotlights additionally gate by a cone factor: full
-    // inside cos 8deg, zero outside cos 12deg, linear in cos^2 between.
-    constexpr float kMinInside2 = 0.95677279; // (cos 12deg)^2
-    constexpr float kMaxInside2 = 0.98063081; // (cos 8deg)^2
-    int nLights = int(obj.lightCount.x);
+    // Local point/spot lights (street lamps, vehicle headlights): the frame
+    // light table selected per object (or per instance), raw light colours
+    // scaled by the night-adjusted material -- GL33's localLights/lightIdx
+    // path. The material colours are zero by day, so this is a no-op in
+    // ordinary daytime scenes, as in GL33.
+    uint4 li = obj.instanced.x > 0.5 ? inst.lightIdx : obj.lightIdx;
+    int nLights = int(li.z);
     for (int i = 0; i < nLights; i++)
     {
-        float3 toLight = obj.lights[i].posAndAtten.xyz - worldPos4.xyz;
-        float size2 = dot(toLight, toLight);
-        float startAtten2 = obj.lights[i].posAndAtten.w * obj.lights[i].posAndAtten.w;
-        float endAtten2 = startAtten2 * 100.0;
-        if (size2 >= endAtten2)
-            continue;
-
-        float cone = 1.0;
-        if (obj.lights[i].dirAndIsSpot.w > 0.5)
-        {
-            // inside = (vertex - light) . beamDir; cos^2(angleFromAxis) = inside^2/size2
-            float inside = -dot(toLight, obj.lights[i].dirAndIsSpot.xyz);
-            if (inside <= 0.0)
-                continue;
-            float cos2 = (inside * inside) / size2;
-            if (cos2 < kMinInside2)
-                continue;
-            cone = clamp((cos2 - kMinInside2) / (kMaxInside2 - kMinInside2), 0.0, 1.0);
-        }
-
-        float atten = (size2 >= startAtten2) ? (startAtten2 / size2) : 1.0;
-        float cosFi = dot(toLight, worldNorm);
-        float3 contrib;
-        if (cosFi > 0.0)
-        {
-            cosFi *= rsqrt(size2);
-            contrib = (obj.lights[i].diffuse.rgb * cosFi + obj.lights[i].ambient.rgb) * (atten * cone);
-        }
-        else
-        {
-            contrib = obj.lights[i].ambient.rgb * atten;
-        }
-        lit += contrib;
+        uint idx = ((i < 4 ? li.x : li.y) >> (8u * uint(i & 3))) & 0xFFu;
+        LocalLight l = lightTable.lights[idx];
+        l.diffuse.rgb *= obj.matDiffuseRaw.rgb;
+        l.ambient.rgb *= obj.matAmbientRaw.rgb;
+        lit += localLightContrib(l, worldPos4.xyz, worldNorm);
     }
     lit = clamp(lit, 0.0, 1.0);
 
@@ -350,6 +593,7 @@ vertex VSOutMesh vsMesh(uint vid [[vertex_id]], const device VertexMesh* verts [
     // EngineMTL::PrepareTriangleTL) -- see fsMeshOpaque's discard test.
     out.isCutout = obj.flags.x;
     out.detailMode = obj.flags.y;
+    out.worldRel = worldPos4.xyz;
     return out;
 }
 
@@ -390,6 +634,10 @@ static inline float4 applyDetailMode(float4 baseTex, float3 diffuseLit, float3 s
 // anti-aliased text/needle edges routinely dip under 50% coverage) turned that into
 // a visible stipple across the whole surface instead of a clean edge.
 constant float kSolidCutoutCoverage = 0.5;
+// Set on the alpha-to-coverage variant of the opaque pipeline: cutout
+// coverage is sharpened around the threshold and handed to the multisample
+// resolve through alpha (GL33's alphaRef.z path) instead of a hard discard.
+constant bool kAlphaToCoverage [[function_constant(0)]];
 
 // Opaque-pipeline fragment shader (blending disabled at the pipeline level,
 // pipelineStateTLOpaque) -- used for every section EXCEPT true Blend
@@ -407,9 +655,11 @@ constant float kSolidCutoutCoverage = 0.5;
 fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants& frame [[buffer(0)]],
                              constant ObjectConstants& obj [[buffer(1)]],
                              texture2d<float> tex [[texture(0)]], texture2d<float> detailTex [[texture(1)]],
-                             sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]])
+                             depth2d_array<float> shadowMap [[texture(2)]],
+                             sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]], sampler shadowSamp [[sampler(2)]])
 {
     float4 texColor = tex.sample(samp, in.uv);
+    float outAlpha = -1.0;
     if (in.isCutout > 0.5)
     {
         // Coverage must come from the texture's own alpha only. in.color.a is
@@ -418,13 +668,24 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
         // -- multiplying it in here made a fully-opaque leaf texel's coverage collapse
         // to ~0.05 at dawn, discarding nearly all foliage fragments (GitHub #60).
         float coverage = texColor.a;
-        if (coverage < kSolidCutoutCoverage)
+        if (kAlphaToCoverage)
+        {
+            float cov = saturate((coverage - kSolidCutoutCoverage) / max(fwidth(coverage), 1e-4) + 0.5);
+            if (cov <= 0.0)
+                discard_fragment();
+            outAlpha = cov;
+        }
+        else if (coverage < kSolidCutoutCoverage)
             discard_fragment();
     }
-    float3 diffuseLit = texColor.rgb * in.color.rgb;
+    float3 diffuseLit = texColor.rgb * in.color.rgb * obj.constColor.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
-    float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
-    return float4(finalColor, in.color.a * detailed.a);
+    if (in.detailMode < 2.5) // water is not shadow-mapped, as in GL33
+        detailed.rgb *= shadowMapFactor(frame, in.worldRel, in.fogFactor, shadowMap, shadowSamp);
+    float3 finalColor = mix(applyNightEye(detailed.rgb, frame.nightEyeCoef), frame.fogColor.rgb, in.fogFactor);
+    if (frame.fogParams.w > 0.5)
+        return float4(1.0, 0.0, 0.0, 1.0);
+    return float4(finalColor, outAlpha >= 0.0 ? outAlpha : in.color.a * detailed.a * obj.constColor.a);
 }
 
 // Blend-pipeline fragment shader (blending enabled, pipelineStateTLBlend) --
@@ -434,25 +695,29 @@ fragment float4 fsMeshOpaque(VSOutMesh in [[stage_in]], constant FrameConstants&
 fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& frame [[buffer(0)]],
                             constant ObjectConstants& obj [[buffer(1)]],
                             texture2d<float> tex [[texture(0)]], texture2d<float> detailTex [[texture(1)]],
-                            sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]])
+                            depth2d_array<float> shadowMap [[texture(2)]],
+                            sampler samp [[sampler(0)]], sampler detailSamp [[sampler(1)]], sampler shadowSamp [[sampler(2)]])
 {
     float4 texColor = tex.sample(samp, in.uv);
     // Alpha-blended mesh sections still write depth, matching the legacy
     // renderer. Never let their fully transparent texture background write
     // an invisible depth rectangle: this is essential for antialiased
     // cutout-like details such as tent ropes and perforated wreck parts.
-    // AI88 is currently expanded through ARGB4444, whose first non-zero
-    // alpha step is 17/255. Treat that lowest quantization step as clear; it
-    // is visually negligible but otherwise stamps depth around thin ropes.
+    // The threshold is GL33's alphaRef for blended sections (1/255); a
+    // higher one punches holes in faint glass reflections.
     // Texture alpha only -- in.color.a (obj.ambient.w) tracks the sun's ambient
     // brightness, not opacity, and would wrongly discard real geometry's depth
     // whenever ambient light is dim (dawn/dusk; see fsMeshOpaque's coverage comment).
-    if (texColor.a < (18.0 / 255.0))
+    if (texColor.a < (1.0 / 255.0))
         discard_fragment();
-    float3 diffuseLit = texColor.rgb * in.color.rgb;
+    float3 diffuseLit = texColor.rgb * in.color.rgb * obj.constColor.rgb;
     float4 detailed = applyDetailMode(texColor, diffuseLit, in.specColor.rgb, in, frame, obj, detailTex, detailSamp);
-    float3 finalColor = mix(detailed.rgb, frame.fogColor.rgb, in.fogFactor);
-    return float4(finalColor, in.color.a * detailed.a);
+    if (in.detailMode < 2.5) // water is not shadow-mapped, as in GL33
+        detailed.rgb *= shadowMapFactor(frame, in.worldRel, in.fogFactor, shadowMap, shadowSamp);
+    float3 finalColor = mix(applyNightEye(detailed.rgb, frame.nightEyeCoef), frame.fogColor.rgb, in.fogFactor);
+    if (frame.fogParams.w > 0.5)
+        return float4(1.0, 0.0, 0.0, 1.0);
+    return float4(finalColor, in.color.a * detailed.a * obj.constColor.a);
 }
 
 // Dedicated unlit vertex shader for shadow draws -- mirrors GL33's vsShadow
@@ -481,11 +746,15 @@ fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& 
 // the same distance-fade here (and to fsShadow, or thread a fog factor
 // through ObjectConstants) so Metal's two paths agree even where GL33's own
 // don't, rather than only matching GL33's existing inconsistency.
-vertex VSOutMesh vsShadow(uint vid [[vertex_id]], const device VertexMesh* verts [[buffer(0)]],
-                          constant ObjectConstants& obj [[buffer(1)]], constant FrameConstants& frame [[buffer(2)]])
+vertex VSOutMesh vsShadow(uint vid [[vertex_id]], uint iid [[instance_id]],
+                          const device VertexMesh* verts [[buffer(0)]], constant ObjectConstants& obj [[buffer(1)]],
+                          constant FrameConstants& frame [[buffer(2)]], const device Instance* instances [[buffer(3)]])
 {
     VertexMesh v = verts[vid];
-    float4 worldPos4 = mulRowVec4(float4(v.pos, 1.0), obj.world);
+    Mat4Rows world = obj.world;
+    if (obj.instanced.x > 0.5)
+        world = instances[iid].world;
+    float4 worldPos4 = mulRowVec4(float4(v.pos, 1.0), world);
     float4 viewPos = mulRowVec4(worldPos4, frame.view);
     float4 clipPos = mulRowVec4(viewPos, frame.projection);
 
@@ -498,6 +767,7 @@ vertex VSOutMesh vsShadow(uint vid [[vertex_id]], const device VertexMesh* verts
     out.fogFactor = 0.0;
     out.isCutout = 0.0;
     out.detailMode = 0.0;
+    out.worldRel = float3(0.0);
     return out;
 }
 
@@ -525,6 +795,53 @@ fragment float4 fsShadow(VSOutMesh in [[stage_in]], texture2d<float> tex [[textu
     if (a < (1.0 / 255.0))
         discard_fragment();
     return float4(0.0, 0.0, 0.0, a);
+}
+)";
+
+// Shadow-map depth pass (GL33's EngineGL33_ShadowDepth.cpp programs): solid
+// casters are position-only with no fragment stage; alpha casters carry a UV
+// and discard on the caster texture's alpha so cutout foliage casts its
+// silhouette.
+const char* kShaderSourceShadowDepth = R"(
+#include <metal_stdlib>
+using namespace metal;
+
+struct DepthOut {
+    float4 position [[position]];
+};
+
+vertex DepthOut vsShadowDepth(uint vid [[vertex_id]], const device packed_float3* pos [[buffer(0)]],
+                              constant float4x4& lightVP [[buffer(1)]])
+{
+    DepthOut out;
+    out.position = lightVP * float4(float3(pos[vid]), 1.0);
+    return out;
+}
+
+struct DepthAlphaOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+struct CasterAlphaVertex {
+    packed_float3 pos;
+    packed_float2 uv;
+};
+
+vertex DepthAlphaOut vsShadowDepthAlpha(uint vid [[vertex_id]], const device CasterAlphaVertex* verts [[buffer(0)]],
+                                        constant float4x4& lightVP [[buffer(1)]])
+{
+    DepthAlphaOut out;
+    out.position = lightVP * float4(float3(verts[vid].pos), 1.0);
+    out.uv = float2(verts[vid].uv);
+    return out;
+}
+
+fragment void fsShadowDepthAlpha(DepthAlphaOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
+                                 sampler samp [[sampler(0)]])
+{
+    if (tex.sample(samp, in.uv).a < 0.5)
+        discard_fragment();
 }
 )";
 
@@ -593,6 +910,45 @@ DrawableSizeChoice ResolveDrawableSize(SDL_Window* window, int fallbackWidth, in
 
 struct EngineMTLBootstrap::Impl
 {
+    std::atomic<unsigned> debugErrorCount{0};
+    std::atomic<int> inFlightCommandBuffers{0};
+    std::mutex debugMessageMutex;
+    std::string lastDebugMessage;
+
+    // Completion handlers run on Metal's own thread, hence the atomics/mutex.
+    // Must be called before commit().
+    void TrackCommandBufferErrors(MTL::CommandBuffer* cmdBuf)
+    {
+        inFlightCommandBuffers.fetch_add(1, std::memory_order_acq_rel);
+        cmdBuf->addCompletedHandler(
+            [this](MTL::CommandBuffer* completed)
+            {
+                if (completed->status() == MTL::CommandBufferStatusError)
+                {
+                    debugErrorCount.fetch_add(1, std::memory_order_relaxed);
+                    const NS::Error* error = completed->error();
+                    const char* text =
+                        error ? error->localizedDescription()->utf8String() : "unknown command buffer error";
+                    {
+                        std::lock_guard<std::mutex> lock(debugMessageMutex);
+                        lastDebugMessage = text;
+                    }
+                    LOG_ERROR(Graphics, "EngineMTLBootstrap: command buffer failed: {}", text);
+                }
+                inFlightCommandBuffers.fetch_sub(1, std::memory_order_acq_rel);
+            });
+    }
+
+    // Shutdown deletes this Impl; a handler firing afterwards would touch
+    // freed memory.
+    void WaitForInFlightCommandBuffers()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (inFlightCommandBuffers.load(std::memory_order_acquire) > 0 &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+    }
+
     SDL_MetalView metalView = nullptr;
     CA::MetalLayer* layer = nullptr;
     MTL::Device* device = nullptr;
@@ -636,7 +992,9 @@ struct EngineMTLBootstrap::Impl
     // blending so opaque/cutout sections never have blending enabled, same
     // split GL33 gets from its opaque-pass-vs-BlendOnly-pass routing (see
     // DrawSectionTL's blendEnabled parameter).
-    MTL::RenderPipelineState* pipelineStateTL = nullptr;      // fsMeshOpaque, blending disabled
+    MTL::RenderPipelineState* pipelineStateTL = nullptr;    // fsMeshOpaque, blending disabled
+    MTL::RenderPipelineState* pipelineStateTLA2C = nullptr; // fsMeshOpaque with kAlphaToCoverage, MSAA only
+    bool alphaToCoverage = true;
     MTL::RenderPipelineState* pipelineStateTLBlend = nullptr; // fsMeshBlend, blending enabled
     // Single-pass shadow variant for the hardware-TL path: vsMesh/fsShadow,
     // color writes ON, Shadow blend factors (Zero, OneMinusSourceAlpha) --
@@ -695,6 +1053,7 @@ struct EngineMTLBootstrap::Impl
         Poseidon::render::AlphaMode alphaMode = Poseidon::render::AlphaMode::Disabled;
         std::uint8_t alphaRef = 0;
         float fogColor[3] = {0.0f, 0.0f, 0.0f};
+        float nightEye[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
         bool operator==(const Triangles2DState& rhs) const
         {
@@ -703,12 +1062,14 @@ struct EngineMTLBootstrap::Impl
                    useDepth == rhs.useDepth && depthMode == rhs.depthMode && blendMode == rhs.blendMode &&
                    sampler == rhs.sampler && surface == rhs.surface && shader == rhs.shader &&
                    alphaMode == rhs.alphaMode && alphaRef == rhs.alphaRef && fogColor[0] == rhs.fogColor[0] &&
-                   fogColor[1] == rhs.fogColor[1] && fogColor[2] == rhs.fogColor[2];
+                   fogColor[1] == rhs.fogColor[1] && fogColor[2] == rhs.fogColor[2] &&
+                   std::memcmp(nightEye, rhs.nightEye, sizeof(nightEye)) == 0;
         }
         bool operator!=(const Triangles2DState& rhs) const { return !(*this == rhs); }
     };
     bool queued2DActive = false;
     Triangles2DState queued2DState;
+    float nightEyeCoef[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     std::vector<Vertex2DMTL> queued2DVertices;
     std::vector<uint16_t> queued2DIndices;
     MTL::Buffer* queued2DVertexBuffer = nullptr;
@@ -719,6 +1080,80 @@ struct EngineMTLBootstrap::Impl
     size_t queued2DIndexBufferUsed = 0;
     std::vector<MTL::Buffer*> pending2DBufferRelease[2];
 
+    // Per-frame stream buffer for instanced-run data (instance arrays + the
+    // local light table): append-only, retired through pending2DBufferRelease
+    // at EndFrame like the queued-2D buffers. The current run/table keep
+    // their own (buffer, offset) since a grow can move the stream on.
+    MTL::Buffer* streamBuffer = nullptr;
+    size_t streamBufferBytes = 0;
+    size_t streamBufferUsed = 0;
+    MTL::Buffer* instanceBuffer = nullptr;
+    size_t instanceOffset = 0;
+    int instanceCount = 0;
+    // Rotating so an upload never overwrites a table a frame still in
+    // flight reads; lightTableBuffer is the most recent upload.
+    MTL::Buffer* lightTables[3] = {};
+    int lightTableNext = 0;
+    MTL::Buffer* lightTableBuffer = nullptr;
+    // Bound in place of the above for scalar draws: one identity instance
+    // and an empty light table, so the vertex stage always has valid buffers.
+    MTL::Buffer* fallbackInstance = nullptr;
+    MTL::Buffer* fallbackLightTable = nullptr;
+    MTL::Texture* heightMap = nullptr; // SetTerrainHeightmap; fallbackWhite stands in until then
+
+    // Shadow-map depth pass (see QueueShadowCascades). The pipelines are
+    // sample-count independent (depth-only targets) so they survive
+    // ReleaseRenderPipelines.
+    MTL::RenderPipelineState* shadowDepthPipeline = nullptr;
+    MTL::RenderPipelineState* shadowDepthAlphaPipeline = nullptr;
+    MTL::DepthStencilState* shadowDepthState = nullptr;
+    MTL::Texture* shadowCascadeArray = nullptr; // Depth32Float 2D array, sampled by the lit shaders
+    MTL::Texture* shadowFallbackArray = nullptr; // 1x1x1, bound when no map is active
+    MTL::Texture* shadowProbeTarget = nullptr;   // single map for ShadowDepthProbe
+    int shadowCascadeRes = 0;
+    int shadowCascadeLayers = 0;
+    bool shadowCascadeRendered = false; // a pass has been committed into shadowCascadeArray
+    struct QueuedShadowPass
+    {
+        bool pending = false;
+        int numCascades = 0;
+        float lightVPs[kShadowCascadesMTL * 16] = {};
+        MTL::Buffer* solidBuffer = nullptr;
+        size_t solidOffset = 0;
+        int solidVertexCount = 0;
+        MTL::Buffer* alphaBuffer = nullptr;
+        size_t alphaOffset = 0;
+        int alphaVertexCount = 0;
+        std::vector<ShadowAlphaBatchMTL> batches;
+    } shadowQueue;
+
+    bool StreamAlloc(size_t bytes, MTL::Buffer*& outBuffer, size_t& outOffset)
+    {
+        constexpr size_t kAlign = 256;
+        const size_t start = (streamBufferUsed + kAlign - 1) & ~(kAlign - 1);
+        if (streamBuffer == nullptr || start + bytes > streamBufferBytes)
+        {
+            if (streamBuffer != nullptr)
+                pending2DBufferRelease[destroyGeneration].push_back(streamBuffer);
+            size_t newBytes = streamBufferBytes > 0 ? streamBufferBytes * 2 : 256 * 1024;
+            if (newBytes < bytes)
+                newBytes = bytes;
+            streamBuffer = device->newBuffer(static_cast<NS::UInteger>(newBytes), MTL::ResourceStorageModeShared);
+            streamBufferBytes = streamBuffer != nullptr ? newBytes : 0;
+            streamBufferUsed = 0;
+            if (streamBuffer == nullptr)
+                return false;
+            outBuffer = streamBuffer;
+            outOffset = 0;
+            streamBufferUsed = bytes;
+            return true;
+        }
+        outBuffer = streamBuffer;
+        outOffset = start;
+        streamBufferUsed = start + bytes;
+        return true;
+    }
+
     // Open between BeginFrame/EndFrame.
     CA::MetalDrawable* currentDrawable = nullptr;
     MTL::CommandBuffer* currentCommandBuffer = nullptr;
@@ -727,6 +1162,23 @@ struct EngineMTLBootstrap::Impl
 
     int drawableWidth = 0;
     int drawableHeight = 0;
+
+    // Offscreen frame target (see SetMsaaSamples/SetRenderScale/SetGamma).
+    int msaaSamples = 0;
+    int pendingMsaaSamples = 0;
+    float renderScale = 1.0f;
+    float pendingRenderScale = 1.0f;
+    float gamma = 1.0f;
+    int frameSampleCount = 1; // what the render pipelines were built for
+    int frameWidth = 0;       // == drawable size unless render scale is on
+    int frameHeight = 0;
+    MTL::Texture* frameColor = nullptr;   // single-sample, shader-readable
+    MTL::Texture* frameColorMS = nullptr; // frameSampleCount > 1 only; resolves into frameColor
+    MTL::RenderPipelineState* presentPipeline = nullptr;
+    MTL::SamplerState* presentSampler = nullptr;
+    bool resolvedThisFrame = false;
+    bool readbackFrame = false;
+    bool vsync = true;
 
     // Two-generation deferred-destroy queue for mesh buffers -- see
     // DestroyMeshBufferDeferred's doc comment. EndFrame() destroys
@@ -880,6 +1332,7 @@ void EngineMTLBootstrap::RenderClearAndPresent(float r, float g, float b, float 
     MTL::RenderCommandEncoder* encoder = cmdBuf->renderCommandEncoder(passDesc);
     encoder->endEncoding();
 
+    _impl->TrackCommandBufferErrors(cmdBuf);
     cmdBuf->presentDrawable(drawable);
     cmdBuf->commit();
 
@@ -892,6 +1345,22 @@ void EngineMTLBootstrap::OnWindowResized(int width, int height)
     if (_impl->layer == nullptr)
         return;
     ApplyDrawableSize(width, height, "window resize");
+}
+
+bool EngineMTLBootstrap::FrameOpen() const
+{
+    return _impl->currentEncoder != nullptr;
+}
+
+unsigned EngineMTLBootstrap::DebugErrorCount() const
+{
+    return _impl->debugErrorCount.load(std::memory_order_relaxed);
+}
+
+std::string EngineMTLBootstrap::LastDebugMessage() const
+{
+    std::lock_guard<std::mutex> lock(_impl->debugMessageMutex);
+    return _impl->lastDebugMessage;
 }
 
 int EngineMTLBootstrap::DrawableWidth() const
@@ -913,7 +1382,6 @@ void EngineMTLBootstrap::ApplyDrawableSize(int fallbackWidth, int fallbackHeight
     _impl->drawableWidth = size.width;
     _impl->drawableHeight = size.height;
     _impl->layer->setDrawableSize(CGSizeMake(static_cast<CGFloat>(size.width), static_cast<CGFloat>(size.height)));
-    EnsureDepthTarget(size.width, size.height);
 
     if (size.safeAreaAdjusted)
     {
@@ -925,12 +1393,13 @@ void EngineMTLBootstrap::ApplyDrawableSize(int fallbackWidth, int fallbackHeight
     }
 }
 
-void EngineMTLBootstrap::EnsureDepthTarget(int width, int height)
+void EngineMTLBootstrap::EnsureDepthTarget(int width, int height, int sampleCount)
 {
     if (_impl->device == nullptr || width <= 0 || height <= 0)
         return;
     if (_impl->depthTexture != nullptr && static_cast<int>(_impl->depthTexture->width()) == width &&
-        static_cast<int>(_impl->depthTexture->height()) == height)
+        static_cast<int>(_impl->depthTexture->height()) == height &&
+        static_cast<int>(_impl->depthTexture->sampleCount()) == sampleCount)
         return;
 
     if (_impl->depthTexture != nullptr)
@@ -947,8 +1416,240 @@ void EngineMTLBootstrap::EnsureDepthTarget(int width, int height)
         false);
     desc->setUsage(MTL::TextureUsageRenderTarget);
     desc->setStorageMode(MTL::StorageModePrivate);
+    if (sampleCount > 1)
+    {
+        desc->setTextureType(MTL::TextureType2DMultisample);
+        desc->setSampleCount(static_cast<NS::UInteger>(sampleCount));
+    }
     _impl->depthTexture = _impl->device->newTexture(desc);
     desc->release();
+}
+
+void EngineMTLBootstrap::SetMsaaSamples(int samples)
+{
+    if (samples >= 8)
+        samples = 8;
+    else if (samples >= 4)
+        samples = 4;
+    else if (samples >= 2)
+        samples = 2;
+    else
+        samples = 0;
+    _impl->pendingMsaaSamples = samples;
+}
+
+int EngineMTLBootstrap::MsaaSamples() const
+{
+    return _impl->msaaSamples;
+}
+
+void EngineMTLBootstrap::SetRenderScale(float scale)
+{
+    if (scale < 1.0f)
+        scale = 1.0f;
+    if (scale > 2.0f)
+        scale = 2.0f;
+    _impl->pendingRenderScale = scale;
+}
+
+float EngineMTLBootstrap::RenderScale() const
+{
+    return _impl->renderScale;
+}
+
+void EngineMTLBootstrap::SetGamma(float gamma)
+{
+    _impl->gamma = gamma > 0.0f ? gamma : 1.0f;
+}
+
+void EngineMTLBootstrap::SetAlphaToCoverage(bool enabled)
+{
+    _impl->alphaToCoverage = enabled;
+}
+
+void EngineMTLBootstrap::SetReadbackFrame(bool readback)
+{
+    _impl->readbackFrame = readback;
+}
+
+bool EngineMTLBootstrap::SetVSync(bool enabled)
+{
+    if (_impl->layer == nullptr)
+        return false;
+    _impl->layer->setDisplaySyncEnabled(enabled);
+    _impl->vsync = enabled;
+    return true;
+}
+
+bool EngineMTLBootstrap::VSync() const
+{
+    return _impl->vsync;
+}
+
+void EngineMTLBootstrap::SetNightEyeCoef(const float coef[4])
+{
+    std::memcpy(_impl->nightEyeCoef, coef, sizeof(_impl->nightEyeCoef));
+}
+
+bool EngineMTLBootstrap::OffscreenActive() const
+{
+    return _impl->frameSampleCount > 1 || _impl->renderScale > 1.001f || _impl->gamma < 0.999f || _impl->gamma > 1.001f;
+}
+
+void EngineMTLBootstrap::ApplyPendingFrameTarget()
+{
+    int sampleCount = _impl->pendingMsaaSamples > 1 ? _impl->pendingMsaaSamples : 1;
+    while (sampleCount > 1 && !_impl->device->supportsTextureSampleCount(static_cast<NS::UInteger>(sampleCount)))
+        sampleCount /= 2;
+    if (sampleCount != _impl->frameSampleCount)
+    {
+        ReleaseRenderPipelines();
+        _impl->frameSampleCount = sampleCount;
+    }
+    _impl->msaaSamples = sampleCount > 1 ? sampleCount : 0;
+    _impl->renderScale = _impl->pendingRenderScale;
+
+    const bool offscreen = OffscreenActive();
+    _impl->frameWidth =
+        offscreen ? static_cast<int>(_impl->drawableWidth * _impl->renderScale + 0.5f) : _impl->drawableWidth;
+    _impl->frameHeight =
+        offscreen ? static_cast<int>(_impl->drawableHeight * _impl->renderScale + 0.5f) : _impl->drawableHeight;
+    if (offscreen)
+        EnsureFrameTarget(_impl->frameWidth, _impl->frameHeight);
+    else
+        ReleaseFrameTarget();
+    EnsureDepthTarget(_impl->frameWidth, _impl->frameHeight, _impl->frameSampleCount);
+}
+
+void EngineMTLBootstrap::EnsureFrameTarget(int width, int height)
+{
+    const bool wantMS = _impl->frameSampleCount > 1;
+    if (_impl->frameColor != nullptr && static_cast<int>(_impl->frameColor->width()) == width &&
+        static_cast<int>(_impl->frameColor->height()) == height && (_impl->frameColorMS != nullptr) == wantMS &&
+        (!wantMS || static_cast<int>(_impl->frameColorMS->sampleCount()) == _impl->frameSampleCount))
+        return;
+    ReleaseFrameTarget();
+
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::texture2DDescriptor(
+        MTL::PixelFormatBGRA8Unorm, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height), false);
+    desc->setStorageMode(MTL::StorageModePrivate);
+    desc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    _impl->frameColor = _impl->device->newTexture(desc);
+    if (wantMS)
+    {
+        desc->setUsage(MTL::TextureUsageRenderTarget);
+        desc->setTextureType(MTL::TextureType2DMultisample);
+        desc->setSampleCount(static_cast<NS::UInteger>(_impl->frameSampleCount));
+        _impl->frameColorMS = _impl->device->newTexture(desc);
+    }
+    desc->release();
+    LOG_INFO(Graphics, "MTL: frame target {}x{} msaa={} scale={} gamma={}", width, height, _impl->msaaSamples,
+             _impl->renderScale, _impl->gamma);
+}
+
+void EngineMTLBootstrap::ReleaseFrameTarget()
+{
+    if (_impl->frameColor != nullptr)
+    {
+        _impl->frameColor->release();
+        _impl->frameColor = nullptr;
+    }
+    if (_impl->frameColorMS != nullptr)
+    {
+        _impl->frameColorMS->release();
+        _impl->frameColorMS = nullptr;
+    }
+}
+
+void EngineMTLBootstrap::ReleaseRenderPipelines()
+{
+    MTL::RenderPipelineState** states[] = {&_impl->pipelineState,           &_impl->pipelineState2DAdditive,
+                                           &_impl->pipelineState2DShadow,   &_impl->pipelineStateTL,
+                                           &_impl->pipelineStateTLA2C,      &_impl->pipelineStateTLBlend,
+                                           &_impl->pipelineStateTLAdditive, &_impl->pipelineStateTLShadow};
+    for (MTL::RenderPipelineState** state : states)
+    {
+        if (*state != nullptr)
+        {
+            (*state)->release();
+            *state = nullptr;
+        }
+    }
+}
+
+void EngineMTLBootstrap::EnsurePresentPipeline()
+{
+    if (_impl->presentPipeline != nullptr || _impl->device == nullptr)
+        return;
+
+    NS::Error* error = nullptr;
+    NS::String* src = NS::String::string(kShaderSourcePresent, NS::StringEncoding::UTF8StringEncoding);
+    MTL::Library* library = _impl->device->newLibrary(src, nullptr, &error);
+    if (library == nullptr)
+    {
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: present shader compile failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+        return;
+    }
+    MTL::Function* vsFn = library->newFunction(NS::String::string("vsPresent", NS::StringEncoding::UTF8StringEncoding));
+    MTL::Function* fsFn = library->newFunction(NS::String::string("fsPresent", NS::StringEncoding::UTF8StringEncoding));
+
+    MTL::RenderPipelineDescriptor* desc = MTL::RenderPipelineDescriptor::alloc()->init();
+    desc->setVertexFunction(vsFn);
+    desc->setFragmentFunction(fsFn);
+    desc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    _impl->presentPipeline = _impl->device->newRenderPipelineState(desc, &error);
+    if (_impl->presentPipeline == nullptr)
+    {
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: present pipeline state creation failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+    }
+    desc->release();
+    vsFn->release();
+    fsFn->release();
+    library->release();
+
+    MTL::SamplerDescriptor* sampDesc = MTL::SamplerDescriptor::alloc()->init();
+    sampDesc->setMinFilter(MTL::SamplerMinMagFilterLinear);
+    sampDesc->setMagFilter(MTL::SamplerMinMagFilterLinear);
+    sampDesc->setSAddressMode(MTL::SamplerAddressModeClampToEdge);
+    sampDesc->setTAddressMode(MTL::SamplerAddressModeClampToEdge);
+    _impl->presentSampler = _impl->device->newSamplerState(sampDesc);
+    sampDesc->release();
+}
+
+void EngineMTLBootstrap::ResolveToDrawable()
+{
+    if (_impl->currentEncoder == nullptr || _impl->resolvedThisFrame)
+        return;
+    _impl->resolvedThisFrame = true;
+    EnsurePresentPipeline();
+
+    FlushTriangles2D();
+    _impl->currentEncoder->endEncoding();
+    _impl->currentEncoder->release();
+    _impl->currentEncoder = nullptr;
+
+    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+    MTL::RenderPassDescriptor* passDesc = MTL::RenderPassDescriptor::alloc()->init();
+    MTL::RenderPassColorAttachmentDescriptor* colorAttachment = passDesc->colorAttachments()->object(0);
+    colorAttachment->setTexture(_impl->currentDrawable->texture());
+    colorAttachment->setLoadAction(MTL::LoadActionDontCare);
+    colorAttachment->setStoreAction(MTL::StoreActionStore);
+    _impl->currentEncoder = _impl->currentCommandBuffer->renderCommandEncoder(passDesc);
+    _impl->currentEncoder->retain();
+    passDesc->release();
+
+    if (_impl->presentPipeline != nullptr && _impl->frameColor != nullptr)
+    {
+        const float invGamma = _impl->readbackFrame ? 1.0f : 1.0f / _impl->gamma;
+        _impl->currentEncoder->setRenderPipelineState(_impl->presentPipeline);
+        _impl->currentEncoder->setFragmentTexture(_impl->frameColor, 0);
+        _impl->currentEncoder->setFragmentSamplerState(_impl->presentSampler, 0);
+        _impl->currentEncoder->setFragmentBytes(&invGamma, sizeof(invGamma), 0);
+        _impl->currentEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+    }
+    pool->release();
 }
 
 std::string EngineMTLBootstrap::GetRendererName() const
@@ -968,13 +1669,17 @@ void EngineMTLBootstrap::BeginDebugOverlayFrame()
     if (_impl->currentDrawable == nullptr)
         return;
 
+    // ImGui derives its pipeline from this descriptor, so it has to match the
+    // pass the overlay is drawn in: the present pass (drawable, no depth)
+    // when the frame goes through the offscreen target, the shared frame
+    // pass otherwise.
     MTL::RenderPassDescriptor* passDesc = MTL::RenderPassDescriptor::alloc()->init();
     MTL::RenderPassColorAttachmentDescriptor* colorAttachment = passDesc->colorAttachments()->object(0);
     colorAttachment->setTexture(_impl->currentDrawable->texture());
     colorAttachment->setLoadAction(MTL::LoadActionLoad);
     colorAttachment->setStoreAction(MTL::StoreActionStore);
 
-    if (_impl->depthTexture != nullptr)
+    if (_impl->depthTexture != nullptr && !OffscreenActive())
     {
         MTL::RenderPassDepthAttachmentDescriptor* depthAttachment = passDesc->depthAttachment();
         depthAttachment->setTexture(_impl->depthTexture);
@@ -993,6 +1698,9 @@ void EngineMTLBootstrap::BeginDebugOverlayFrame()
 
 void EngineMTLBootstrap::RenderDebugOverlay()
 {
+    // Like GL33, the overlay goes on top of the resolved window-sized image.
+    if (OffscreenActive())
+        ResolveToDrawable();
     Poseidon::Dev::DebugOverlayMetal::Render(_impl->currentCommandBuffer, _impl->currentEncoder);
 }
 
@@ -1047,6 +1755,7 @@ void EngineMTLBootstrap::EnsurePipeline()
     // pipeline's own depth-stencil state never touches the stencil plane.
     desc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
     desc->setStencilAttachmentPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
+    desc->setSampleCount(static_cast<NS::UInteger>(_impl->frameSampleCount));
 
     _impl->pipelineState = _impl->device->newRenderPipelineState(desc, &error);
     if (_impl->pipelineState == nullptr)
@@ -1234,8 +1943,21 @@ void EngineMTLBootstrap::EnsureTLPipeline()
     }
 
     MTL::Function* vsFn = library->newFunction(NS::String::string("vsMesh", NS::StringEncoding::UTF8StringEncoding));
-    MTL::Function* fsFnOpaque =
-        library->newFunction(NS::String::string("fsMeshOpaque", NS::StringEncoding::UTF8StringEncoding));
+    // fsMeshOpaque carries a function constant, so both variants must be
+    // specialized explicitly -- Metal rejects the unspecialized function.
+    auto specializeOpaque = [&](bool alphaToCoverage) -> MTL::Function*
+    {
+        MTL::FunctionConstantValues* constants = MTL::FunctionConstantValues::alloc()->init();
+        constants->setConstantValue(&alphaToCoverage, MTL::DataTypeBool, NS::UInteger(0));
+        MTL::Function* fn = library->newFunction(
+            NS::String::string("fsMeshOpaque", NS::StringEncoding::UTF8StringEncoding), constants, &error);
+        constants->release();
+        if (fn == nullptr)
+            LOG_ERROR(Graphics, "EngineMTLBootstrap: fsMeshOpaque specialization (a2c={}) failed: {}", alphaToCoverage,
+                      error ? error->localizedDescription()->utf8String() : "(unknown)");
+        return fn;
+    };
+    MTL::Function* fsFnOpaque = specializeOpaque(false);
     MTL::Function* fsFnBlend =
         library->newFunction(NS::String::string("fsMeshBlend", NS::StringEncoding::UTF8StringEncoding));
     MTL::Function* fsFnShadow =
@@ -1254,12 +1976,31 @@ void EngineMTLBootstrap::EnsureTLPipeline()
     colorDesc->setBlendingEnabled(false);
     desc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
     desc->setStencilAttachmentPixelFormat(MTL::PixelFormatDepth32Float_Stencil8);
+    desc->setSampleCount(static_cast<NS::UInteger>(_impl->frameSampleCount));
 
     _impl->pipelineStateTL = _impl->device->newRenderPipelineState(desc, &error);
     if (_impl->pipelineStateTL == nullptr)
     {
         LOG_ERROR(Graphics, "EngineMTLBootstrap: mesh pipeline state creation failed: {}",
                   error ? error->localizedDescription()->utf8String() : "(unknown)");
+    }
+
+    if (_impl->frameSampleCount > 1)
+    {
+        MTL::Function* fsFnA2C = specializeOpaque(true);
+        if (fsFnA2C != nullptr)
+        {
+            desc->setFragmentFunction(fsFnA2C);
+            desc->setAlphaToCoverageEnabled(true);
+            _impl->pipelineStateTLA2C = _impl->device->newRenderPipelineState(desc, &error);
+            if (_impl->pipelineStateTLA2C == nullptr)
+            {
+                LOG_ERROR(Graphics, "EngineMTLBootstrap: mesh alpha-to-coverage pipeline state creation failed: {}",
+                          error ? error->localizedDescription()->utf8String() : "(unknown)");
+            }
+            desc->setAlphaToCoverageEnabled(false);
+            fsFnA2C->release();
+        }
     }
 
     // Blend variant: same vertex stage + depth format, fsMeshBlend fragment
@@ -1320,7 +2061,8 @@ void EngineMTLBootstrap::EnsureTLPipeline()
 
     desc->release();
     vsFn->release();
-    fsFnOpaque->release();
+    if (fsFnOpaque != nullptr)
+        fsFnOpaque->release();
     fsFnBlend->release();
     fsFnShadow->release();
     vsFnShadow->release();
@@ -1347,6 +2089,24 @@ void EngineMTLBootstrap::EnsureFallbackResources()
 
     const uint8_t whitePixel[4] = {255, 255, 255, 255};
     _impl->fallbackWhite->replaceRegion(MTL::Region::Make2D(0, 0, 1, 1), 0, whitePixel, 4);
+
+    InstanceMTL identity = {};
+    identity.world.m[0] = identity.world.m[5] = identity.world.m[10] = identity.world.m[15] = 1.0f;
+    _impl->fallbackInstance = _impl->device->newBuffer(&identity, sizeof(identity), MTL::ResourceStorageModeShared);
+    LocalLightTableMTL emptyTable = {};
+    _impl->fallbackLightTable =
+        _impl->device->newBuffer(&emptyTable, sizeof(emptyTable), MTL::ResourceStorageModeShared);
+
+    MTL::TextureDescriptor* shadowDesc = MTL::TextureDescriptor::alloc()->init();
+    shadowDesc->setTextureType(MTL::TextureType2DArray);
+    shadowDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
+    shadowDesc->setWidth(1);
+    shadowDesc->setHeight(1);
+    shadowDesc->setArrayLength(1);
+    shadowDesc->setUsage(MTL::TextureUsageShaderRead);
+    shadowDesc->setStorageMode(MTL::StorageModePrivate);
+    _impl->shadowFallbackArray = _impl->device->newTexture(shadowDesc);
+    shadowDesc->release();
 }
 
 bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool clear, bool clearZ)
@@ -1356,6 +2116,9 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
 
     _impl->frameCounter++;
 
+    // Before EnsurePipeline: a sample-count change drops the pipelines.
+    if (_impl->currentDrawable == nullptr)
+        ApplyPendingFrameTarget();
     EnsurePipeline();
     EnsureFallbackResources();
     if (_impl->pipelineState == nullptr)
@@ -1382,6 +2145,7 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
 
     if (firstPassThisFrame)
     {
+        _impl->resolvedThisFrame = false;
         // First Clear() of this displayed frame: acquire the drawable and
         // open the frame's one command buffer. This must happen exactly
         // once per frame -- nextDrawable() hands back a recycled texture
@@ -1417,7 +2181,27 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
 
     MTL::RenderPassDescriptor* passDesc = MTL::RenderPassDescriptor::alloc()->init();
     MTL::RenderPassColorAttachmentDescriptor* colorAttachment = passDesc->colorAttachments()->object(0);
-    colorAttachment->setTexture(_impl->currentDrawable->texture());
+    if (OffscreenActive() && _impl->frameColor != nullptr)
+    {
+        if (_impl->frameColorMS != nullptr)
+        {
+            // Resolve after every pass so a mid-frame Clear() can Load the
+            // multisample texture and the present pass reads a complete frame.
+            colorAttachment->setTexture(_impl->frameColorMS);
+            colorAttachment->setResolveTexture(_impl->frameColor);
+            colorAttachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+        }
+        else
+        {
+            colorAttachment->setTexture(_impl->frameColor);
+            colorAttachment->setStoreAction(MTL::StoreActionStore);
+        }
+    }
+    else
+    {
+        colorAttachment->setTexture(_impl->currentDrawable->texture());
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+    }
     // GL's Clear(false, false) or Clear(true, false) on the first draw of a
     // frame still targets the current backbuffer after swap. Under Metal,
     // LoadActionLoad on the first pass reads an undefined recycled drawable.
@@ -1427,7 +2211,6 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
     // content has already been drawn.
     const bool clearColorThisPass = clear || firstPassThisFrame || !_impl->frameHadColorClear;
     colorAttachment->setLoadAction(clearColorThisPass ? MTL::LoadActionClear : MTL::LoadActionLoad);
-    colorAttachment->setStoreAction(MTL::StoreActionStore);
     colorAttachment->setClearColor(MTL::ClearColor::Make(r, g, b, a));
     if (clearColorThisPass)
         _impl->frameHadColorClear = true;
@@ -1463,8 +2246,8 @@ bool EngineMTLBootstrap::BeginFrame(float r, float g, float b, float a, bool cle
     MTL::Viewport viewport;
     viewport.originX = 0.0;
     viewport.originY = 0.0;
-    viewport.width = static_cast<double>(_impl->drawableWidth);
-    viewport.height = static_cast<double>(_impl->drawableHeight);
+    viewport.width = static_cast<double>(_impl->frameWidth);
+    viewport.height = static_cast<double>(_impl->frameHeight);
     viewport.znear = 0.0;
     viewport.zfar = 1.0;
     _impl->currentEncoder->setViewport(viewport);
@@ -1508,6 +2291,7 @@ void EngineMTLBootstrap::FlushTriangles2D()
                                   state.alphaMode == Poseidon::render::AlphaMode::TestAndBlend;
     const float alphaTestBuf[2] = {state.alphaRef / 255.0f, alphaTestEnabled ? 1.0f : 0.0f};
     _impl->currentEncoder->setFragmentBytes(alphaTestBuf, sizeof(alphaTestBuf), 1);
+    _impl->currentEncoder->setFragmentBytes(state.nightEye, sizeof(state.nightEye), 2);
 
     // Explicit rebind, not inherited from BeginFrame's initial bind -- a
     // DrawSectionTL call earlier in this same encoder would otherwise leave
@@ -1552,16 +2336,20 @@ void EngineMTLBootstrap::FlushTriangles2D()
     _impl->currentEncoder->setFrontFacingWinding(MTL::WindingClockwise);
     _impl->currentEncoder->setCullMode(measuredWorldCutout ? MTL::CullModeBack : MTL::CullModeNone);
 
-    // Clamp to the drawable -- Metal's setScissorRect raises a validation
-    // error if the rect extends past the render target.
-    int x0 = state.clipX < 0 ? 0 : state.clipX;
-    int y0 = state.clipY < 0 ? 0 : state.clipY;
-    int x1 = state.clipX + state.clipW;
-    int y1 = state.clipY + state.clipH;
-    if (x1 > _impl->drawableWidth)
-        x1 = _impl->drawableWidth;
-    if (y1 > _impl->drawableHeight)
-        y1 = _impl->drawableHeight;
+    // Clip rects arrive in window pixels; the frame target may be render-
+    // scaled. Clamp to the target -- Metal's setScissorRect raises a
+    // validation error if the rect extends past the render target.
+    const float clipScale =
+        _impl->drawableWidth > 0 ? static_cast<float>(_impl->frameWidth) / _impl->drawableWidth : 1.0f;
+    const auto scaled = [clipScale](int v) { return static_cast<int>(v * clipScale + 0.5f); };
+    int x0 = state.clipX < 0 ? 0 : scaled(state.clipX);
+    int y0 = state.clipY < 0 ? 0 : scaled(state.clipY);
+    int x1 = scaled(state.clipX + state.clipW);
+    int y1 = scaled(state.clipY + state.clipH);
+    if (x1 > _impl->frameWidth)
+        x1 = _impl->frameWidth;
+    if (y1 > _impl->frameHeight)
+        y1 = _impl->frameHeight;
     if (x1 <= x0 || y1 <= y0)
     {
         _impl->queued2DActive = false;
@@ -1644,6 +2432,7 @@ void EngineMTLBootstrap::FlushTriangles2D()
     _impl->currentEncoder->drawIndexedPrimitives(
         MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(_impl->queued2DIndices.size()), MTL::IndexTypeUInt16,
         _impl->queued2DIndexBuffer, static_cast<NS::UInteger>(indexOffset));
+    ++Poseidon::gPerfDrawCalls;
 
     _impl->queued2DActive = false;
     _impl->queued2DVertices.clear();
@@ -1679,6 +2468,7 @@ void EngineMTLBootstrap::DrawTriangles2D(const Vertex2DMTL* verts, int vertCount
     state.fogColor[0] = fogColor ? fogColor[0] : 0.0f;
     state.fogColor[1] = fogColor ? fogColor[1] : 0.0f;
     state.fogColor[2] = fogColor ? fogColor[2] : 0.0f;
+    std::memcpy(state.nightEye, _impl->nightEyeCoef, sizeof(state.nightEye));
 
     if (_impl->queued2DActive &&
         (_impl->queued2DState != state ||
@@ -1713,9 +2503,13 @@ bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* scre
     // retain()'d when stored, so release them explicitly here too, after
     // they're done being used (endEncoding/presentDrawable/commit), rather
     // than relying on any pool's drain timing.
+    if (OffscreenActive())
+        ResolveToDrawable();
+
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
 
     _impl->currentEncoder->endEncoding();
+    EncodeQueuedShadowCascades();
 
     MTL::Buffer* screenshotBuffer = nullptr;
     int captureWidth = 0;
@@ -1739,6 +2533,7 @@ bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* scre
         }
     }
 
+    _impl->TrackCommandBufferErrors(_impl->currentCommandBuffer);
     _impl->currentCommandBuffer->presentDrawable(_impl->currentDrawable);
     _impl->currentCommandBuffer->commit();
 
@@ -1788,6 +2583,15 @@ bool EngineMTLBootstrap::EndFrame(std::vector<uint8_t>* screenshotRGB, int* scre
         _impl->queued2DIndexBufferBytes = 0;
         _impl->queued2DIndexBufferUsed = 0;
     }
+    if (_impl->streamBuffer != nullptr)
+    {
+        _impl->pending2DBufferRelease[_impl->destroyGeneration].push_back(_impl->streamBuffer);
+        _impl->streamBuffer = nullptr;
+        _impl->streamBufferBytes = 0;
+        _impl->streamBufferUsed = 0;
+    }
+    _impl->instanceBuffer = nullptr;
+    _impl->instanceCount = 0;
 
     pool->release();
 
@@ -1913,6 +2717,11 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     // descriptor mode) falls back
     // to the no-blend Opaque/Cutout pipeline.
     MTL::RenderPipelineState* pipeline = _impl->pipelineStateTL;
+    // GL33 gates alpha-to-coverage to opaque, alpha-tested mesh draws (its
+    // ApplyPassState a2c) -- here, measured cutouts on the opaque pipeline.
+    if (_impl->alphaToCoverage && _impl->pipelineStateTLA2C != nullptr &&
+        blendMode == Poseidon::render::BlendMode::Opaque && obj.flags[0] > 0.5f)
+        pipeline = _impl->pipelineStateTLA2C;
     if (blendMode == Poseidon::render::BlendMode::Shadow)
         pipeline = _impl->pipelineStateTLShadow;
     else if (blendMode == Poseidon::render::BlendMode::Additive)
@@ -1951,21 +2760,411 @@ void EngineMTLBootstrap::DrawSectionTL(int vertexBufferHandle, int indexBufferHa
     MTL::ScissorRect scissor;
     scissor.x = 0;
     scissor.y = 0;
-    scissor.width = static_cast<NS::UInteger>(_impl->drawableWidth);
-    scissor.height = static_cast<NS::UInteger>(_impl->drawableHeight);
+    scissor.width = static_cast<NS::UInteger>(_impl->frameWidth);
+    scissor.height = static_cast<NS::UInteger>(_impl->frameHeight);
     _impl->currentEncoder->setScissorRect(scissor);
 
+    const bool instanced = _impl->instanceCount > 1 && _impl->instanceBuffer != nullptr;
+    ObjectConstantsMTL objDraw = obj;
+    objDraw.instanced[0] = instanced ? 1.0f : 0.0f;
+
     _impl->currentEncoder->setVertexBuffer(vbuf, 0, 0);
-    _impl->currentEncoder->setVertexBytes(&obj, sizeof(obj), 1);
+    _impl->currentEncoder->setVertexBytes(&objDraw, sizeof(objDraw), 1);
     _impl->currentEncoder->setVertexBytes(&frame, sizeof(frame), 2);
+    if (instanced)
+        _impl->currentEncoder->setVertexBuffer(_impl->instanceBuffer, _impl->instanceOffset, 3);
+    else
+        _impl->currentEncoder->setVertexBuffer(_impl->fallbackInstance, 0, 3);
+    if (_impl->lightTableBuffer != nullptr)
+        _impl->currentEncoder->setVertexBuffer(_impl->lightTableBuffer, 0, 4);
+    else
+        _impl->currentEncoder->setVertexBuffer(_impl->fallbackLightTable, 0, 4);
+    _impl->currentEncoder->setVertexTexture(_impl->heightMap != nullptr ? _impl->heightMap : _impl->fallbackWhite, 0);
     _impl->currentEncoder->setFragmentBytes(&frame, sizeof(frame), 0);
-    _impl->currentEncoder->setFragmentBytes(&obj, sizeof(obj), 1);
+    _impl->currentEncoder->setFragmentBytes(&objDraw, sizeof(objDraw), 1);
     _impl->currentEncoder->setFragmentTexture(tex, 0);
     _impl->currentEncoder->setFragmentTexture(secondaryTex, 1);
+    // Cascade depth array for the lit shadow test; frame.shadowCtl.x gates the
+    // sampling, so the fallback only has to be a valid binding.
+    MTL::Texture* shadowTex = _impl->shadowCascadeRendered && _impl->shadowCascadeArray != nullptr
+                                  ? _impl->shadowCascadeArray
+                                  : _impl->shadowFallbackArray;
+    _impl->currentEncoder->setFragmentTexture(shadowTex, 2);
+    _impl->currentEncoder->setFragmentSamplerState(_impl->samplerStates[7], 2); // point, clamp both axes
 
     const NS::UInteger offsetBytes = static_cast<NS::UInteger>(firstIndex) * sizeof(uint16_t);
-    _impl->currentEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(indexCount),
-                                                 MTL::IndexTypeUInt16, ibuf, offsetBytes);
+    if (instanced)
+        _impl->currentEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(indexCount),
+                                                     MTL::IndexTypeUInt16, ibuf, offsetBytes,
+                                                     static_cast<NS::UInteger>(_impl->instanceCount));
+    else
+        _impl->currentEncoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(indexCount),
+                                                     MTL::IndexTypeUInt16, ibuf, offsetBytes);
+    ++Poseidon::gPerfDrawCalls;
+}
+
+void EngineMTLBootstrap::EnsureShadowDepthPipelines()
+{
+    if (_impl->shadowDepthPipeline != nullptr || _impl->device == nullptr)
+        return;
+
+    NS::Error* error = nullptr;
+    NS::String* src = NS::String::string(kShaderSourceShadowDepth, NS::StringEncoding::UTF8StringEncoding);
+    MTL::Library* library = _impl->device->newLibrary(src, nullptr, &error);
+    if (library == nullptr)
+    {
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: shadow-depth shader compile failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+        return;
+    }
+    MTL::Function* vsSolid =
+        library->newFunction(NS::String::string("vsShadowDepth", NS::StringEncoding::UTF8StringEncoding));
+    MTL::Function* vsAlpha =
+        library->newFunction(NS::String::string("vsShadowDepthAlpha", NS::StringEncoding::UTF8StringEncoding));
+    MTL::Function* fsAlpha =
+        library->newFunction(NS::String::string("fsShadowDepthAlpha", NS::StringEncoding::UTF8StringEncoding));
+
+    MTL::RenderPipelineDescriptor* desc = MTL::RenderPipelineDescriptor::alloc()->init();
+    desc->setVertexFunction(vsSolid);
+    desc->setFragmentFunction(nullptr);
+    desc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+    desc->setSampleCount(1);
+    _impl->shadowDepthPipeline = _impl->device->newRenderPipelineState(desc, &error);
+    if (_impl->shadowDepthPipeline == nullptr)
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: shadow-depth pipeline creation failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+
+    desc->setVertexFunction(vsAlpha);
+    desc->setFragmentFunction(fsAlpha);
+    _impl->shadowDepthAlphaPipeline = _impl->device->newRenderPipelineState(desc, &error);
+    if (_impl->shadowDepthAlphaPipeline == nullptr)
+        LOG_ERROR(Graphics, "EngineMTLBootstrap: shadow-depth alpha pipeline creation failed: {}",
+                  error ? error->localizedDescription()->utf8String() : "(unknown)");
+    desc->release();
+
+    MTL::DepthStencilDescriptor* depthDesc = MTL::DepthStencilDescriptor::alloc()->init();
+    depthDesc->setDepthCompareFunction(MTL::CompareFunctionLessEqual);
+    depthDesc->setDepthWriteEnabled(true);
+    _impl->shadowDepthState = _impl->device->newDepthStencilState(depthDesc);
+    depthDesc->release();
+
+    vsSolid->release();
+    vsAlpha->release();
+    fsAlpha->release();
+    library->release();
+}
+
+bool EngineMTLBootstrap::EnsureShadowCascadeArray(int res, int layers)
+{
+    if (_impl->shadowCascadeArray != nullptr && _impl->shadowCascadeRes == res && _impl->shadowCascadeLayers == layers)
+        return true;
+    if (_impl->shadowCascadeArray != nullptr)
+    {
+        _impl->shadowCascadeArray->release();
+        _impl->shadowCascadeArray = nullptr;
+        _impl->shadowCascadeRendered = false;
+    }
+    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+    desc->setTextureType(MTL::TextureType2DArray);
+    desc->setPixelFormat(MTL::PixelFormatDepth32Float);
+    desc->setWidth(static_cast<NS::UInteger>(res));
+    desc->setHeight(static_cast<NS::UInteger>(res));
+    desc->setArrayLength(static_cast<NS::UInteger>(layers));
+    desc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    desc->setStorageMode(MTL::StorageModePrivate);
+    _impl->shadowCascadeArray = _impl->device->newTexture(desc);
+    desc->release();
+    if (_impl->shadowCascadeArray == nullptr)
+        return false;
+    _impl->shadowCascadeRes = res;
+    _impl->shadowCascadeLayers = layers;
+    return true;
+}
+
+namespace
+{
+// One depth-only pass into `target` slice `slice` from `lightVP`: solid
+// casters keep their back faces (front-face cull, so a lit surface is always
+// nearer the light than the stored depth and cannot self-shadow), alpha
+// batches are two-sided with a texture-alpha discard. Mirrors GL33's
+// RenderCascadeArray loop body.
+void EncodeShadowDepthPass(MTL::CommandBuffer* cmd, MTL::Texture* target, int slice, const float* lightVP,
+                           MTL::RenderPipelineState* solidPipeline, MTL::RenderPipelineState* alphaPipeline,
+                           MTL::DepthStencilState* depthState, MTL::Buffer* solidBuffer, size_t solidOffset,
+                           int solidCount, MTL::Buffer* alphaBuffer, size_t alphaOffset,
+                           const std::vector<ShadowAlphaBatchMTL>* batches, const std::vector<MTL::Texture*>& textures,
+                           MTL::Texture* fallbackWhite, MTL::SamplerState* alphaSampler)
+{
+    MTL::RenderPassDescriptor* pass = MTL::RenderPassDescriptor::alloc()->init();
+    MTL::RenderPassDepthAttachmentDescriptor* depth = pass->depthAttachment();
+    depth->setTexture(target);
+    depth->setSlice(static_cast<NS::UInteger>(slice));
+    depth->setLoadAction(MTL::LoadActionClear);
+    depth->setClearDepth(1.0);
+    depth->setStoreAction(MTL::StoreActionStore);
+    MTL::RenderCommandEncoder* enc = cmd->renderCommandEncoder(pass);
+    pass->release();
+
+    enc->setDepthStencilState(depthState);
+    enc->setFrontFacingWinding(MTL::WindingClockwise);
+    enc->setVertexBytes(lightVP, sizeof(float) * 16, 1);
+    if (solidCount >= 3 && solidBuffer != nullptr)
+    {
+        enc->setRenderPipelineState(solidPipeline);
+        enc->setCullMode(MTL::CullModeFront);
+        enc->setVertexBuffer(solidBuffer, solidOffset, 0);
+        enc->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), static_cast<NS::UInteger>(solidCount));
+    }
+    if (batches != nullptr && !batches->empty() && alphaBuffer != nullptr)
+    {
+        enc->setRenderPipelineState(alphaPipeline);
+        enc->setCullMode(MTL::CullModeNone);
+        enc->setVertexBuffer(alphaBuffer, alphaOffset, 0);
+        enc->setFragmentSamplerState(alphaSampler, 0);
+        for (const ShadowAlphaBatchMTL& b : *batches)
+        {
+            if (b.vertexCount < 3)
+                continue;
+            MTL::Texture* tex = fallbackWhite;
+            if (b.textureHandle > 0 && static_cast<size_t>(b.textureHandle) <= textures.size() &&
+                textures[b.textureHandle - 1] != nullptr)
+                tex = textures[b.textureHandle - 1];
+            enc->setFragmentTexture(tex, 0);
+            enc->drawPrimitives(MTL::PrimitiveTypeTriangle, static_cast<NS::UInteger>(b.firstVertex),
+                                static_cast<NS::UInteger>(b.vertexCount));
+        }
+    }
+    enc->endEncoding();
+}
+} // namespace
+
+bool EngineMTLBootstrap::QueueShadowCascades(const float* lightVPs, int numCascades, int res, const float* solidXYZ,
+                                             int solidVertexCount, const float* alphaXYZUV, int alphaVertexCount,
+                                             const ShadowAlphaBatchMTL* batches, int batchCount)
+{
+    Impl::QueuedShadowPass& q = _impl->shadowQueue;
+    q = Impl::QueuedShadowPass{};
+    const bool haveSolid = solidXYZ != nullptr && solidVertexCount >= 3;
+    const bool haveAlpha = alphaXYZUV != nullptr && alphaVertexCount >= 3 && batches != nullptr && batchCount > 0;
+    if (_impl->device == nullptr || _impl->currentEncoder == nullptr || lightVPs == nullptr || res <= 0 ||
+        numCascades < 1 || (!haveSolid && !haveAlpha))
+        return false;
+    if (numCascades > kShadowCascadesMTL)
+        numCascades = kShadowCascadesMTL;
+    EnsureShadowDepthPipelines();
+    if (_impl->shadowDepthPipeline == nullptr || _impl->shadowDepthAlphaPipeline == nullptr ||
+        !EnsureShadowCascadeArray(res, numCascades))
+        return false;
+
+    if (haveSolid)
+    {
+        const size_t bytes = static_cast<size_t>(solidVertexCount) * 3 * sizeof(float);
+        if (!_impl->StreamAlloc(bytes, q.solidBuffer, q.solidOffset))
+            return false;
+        std::memcpy(static_cast<uint8_t*>(q.solidBuffer->contents()) + q.solidOffset, solidXYZ, bytes);
+        q.solidVertexCount = solidVertexCount;
+    }
+    if (haveAlpha)
+    {
+        const size_t bytes = static_cast<size_t>(alphaVertexCount) * 5 * sizeof(float);
+        if (!_impl->StreamAlloc(bytes, q.alphaBuffer, q.alphaOffset))
+            return false;
+        std::memcpy(static_cast<uint8_t*>(q.alphaBuffer->contents()) + q.alphaOffset, alphaXYZUV, bytes);
+        q.alphaVertexCount = alphaVertexCount;
+        q.batches.assign(batches, batches + batchCount);
+    }
+    std::memcpy(q.lightVPs, lightVPs, sizeof(float) * 16 * static_cast<size_t>(numCascades));
+    q.numCascades = numCascades;
+    q.pending = true;
+    return true;
+}
+
+void EngineMTLBootstrap::EncodeQueuedShadowCascades()
+{
+    Impl::QueuedShadowPass& q = _impl->shadowQueue;
+    if (!q.pending || _impl->currentCommandBuffer == nullptr || _impl->shadowCascadeArray == nullptr)
+    {
+        q.pending = false;
+        return;
+    }
+    for (int i = 0; i < q.numCascades; i++)
+    {
+        EncodeShadowDepthPass(_impl->currentCommandBuffer, _impl->shadowCascadeArray, i, q.lightVPs + i * 16,
+                              _impl->shadowDepthPipeline, _impl->shadowDepthAlphaPipeline, _impl->shadowDepthState,
+                              q.solidBuffer, q.solidOffset, q.solidVertexCount, q.alphaBuffer, q.alphaOffset,
+                              &q.batches, _impl->textures, _impl->fallbackWhite, _impl->samplerStates[0]);
+    }
+    _impl->shadowCascadeRendered = true;
+    q = Impl::QueuedShadowPass{};
+}
+
+bool EngineMTLBootstrap::ShadowDepthProbe(const float* lightVP16, const float* triXYZ, int vertCount, int res,
+                                          float* outDepth)
+{
+    if (_impl->device == nullptr || _impl->commandQueue == nullptr || lightVP16 == nullptr || triXYZ == nullptr ||
+        vertCount < 3 || res <= 0 || outDepth == nullptr)
+        return false;
+    EnsureShadowDepthPipelines();
+    EnsureFallbackResources();
+    if (_impl->shadowDepthPipeline == nullptr)
+        return false;
+
+    if (_impl->shadowProbeTarget != nullptr && static_cast<int>(_impl->shadowProbeTarget->width()) != res)
+    {
+        _impl->shadowProbeTarget->release();
+        _impl->shadowProbeTarget = nullptr;
+    }
+    if (_impl->shadowProbeTarget == nullptr)
+    {
+        MTL::TextureDescriptor* desc = MTL::TextureDescriptor::texture2DDescriptor(
+            MTL::PixelFormatDepth32Float, static_cast<NS::UInteger>(res), static_cast<NS::UInteger>(res), false);
+        desc->setUsage(MTL::TextureUsageRenderTarget);
+        desc->setStorageMode(MTL::StorageModePrivate);
+        _impl->shadowProbeTarget = _impl->device->newTexture(desc);
+        desc->release();
+        if (_impl->shadowProbeTarget == nullptr)
+            return false;
+    }
+
+    const size_t vertBytes = static_cast<size_t>(vertCount) * 3 * sizeof(float);
+    MTL::Buffer* verts = _impl->device->newBuffer(triXYZ, vertBytes, MTL::ResourceStorageModeShared);
+    const size_t rowBytes = static_cast<size_t>(res) * sizeof(float);
+    MTL::Buffer* readback = _impl->device->newBuffer(rowBytes * static_cast<size_t>(res), MTL::ResourceStorageModeShared);
+    if (verts == nullptr || readback == nullptr)
+    {
+        if (verts)
+            verts->release();
+        if (readback)
+            readback->release();
+        return false;
+    }
+
+    MTL::CommandBuffer* cmd = _impl->commandQueue->commandBuffer();
+    // Single-map probe: capture both faces, like GL33's RenderDepthFBO.
+    MTL::RenderPassDescriptor* pass = MTL::RenderPassDescriptor::alloc()->init();
+    pass->depthAttachment()->setTexture(_impl->shadowProbeTarget);
+    pass->depthAttachment()->setLoadAction(MTL::LoadActionClear);
+    pass->depthAttachment()->setClearDepth(1.0);
+    pass->depthAttachment()->setStoreAction(MTL::StoreActionStore);
+    MTL::RenderCommandEncoder* enc = cmd->renderCommandEncoder(pass);
+    pass->release();
+    enc->setRenderPipelineState(_impl->shadowDepthPipeline);
+    enc->setDepthStencilState(_impl->shadowDepthState);
+    enc->setCullMode(MTL::CullModeNone);
+    enc->setVertexBuffer(verts, 0, 0);
+    enc->setVertexBytes(lightVP16, sizeof(float) * 16, 1);
+    enc->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), static_cast<NS::UInteger>(vertCount));
+    enc->endEncoding();
+
+    MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
+    blit->copyFromTexture(_impl->shadowProbeTarget, 0, 0, MTL::Origin(0, 0, 0), MTL::Size(res, res, 1), readback, 0,
+                          rowBytes, rowBytes * static_cast<size_t>(res), MTL::BlitOptionNone);
+    blit->endEncoding();
+    cmd->commit();
+    cmd->waitUntilCompleted();
+
+    // Rows come back top-down; GL's readback (the oracle's layout) is bottom-up.
+    const float* src = static_cast<const float*>(readback->contents());
+    for (int y = 0; y < res; y++)
+        std::memcpy(outDepth + static_cast<size_t>(res - 1 - y) * res, src + static_cast<size_t>(y) * res, rowBytes);
+    verts->release();
+    readback->release();
+    return true;
+}
+
+bool EngineMTLBootstrap::ReadShadowCascade0(std::vector<float>& outDepth, int& outRes)
+{
+    if (_impl->device == nullptr || _impl->commandQueue == nullptr || !_impl->shadowCascadeRendered ||
+        _impl->shadowCascadeArray == nullptr)
+        return false;
+    const int res = _impl->shadowCascadeRes;
+    const size_t rowBytes = static_cast<size_t>(res) * sizeof(float);
+    MTL::Buffer* readback = _impl->device->newBuffer(rowBytes * static_cast<size_t>(res), MTL::ResourceStorageModeShared);
+    if (readback == nullptr)
+        return false;
+    MTL::CommandBuffer* cmd = _impl->commandQueue->commandBuffer();
+    MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
+    blit->copyFromTexture(_impl->shadowCascadeArray, 0, 0, MTL::Origin(0, 0, 0), MTL::Size(res, res, 1), readback, 0,
+                          rowBytes, rowBytes * static_cast<size_t>(res), MTL::BlitOptionNone);
+    blit->endEncoding();
+    cmd->commit();
+    cmd->waitUntilCompleted();
+    outDepth.assign(static_cast<const float*>(readback->contents()),
+                    static_cast<const float*>(readback->contents()) + static_cast<size_t>(res) * res);
+    outRes = res;
+    readback->release();
+    return true;
+}
+
+bool EngineMTLBootstrap::SetTerrainHeightmap(const float* heights, int width, int height)
+{
+    if (_impl->device == nullptr || heights == nullptr || width <= 0 || height <= 0)
+        return false;
+    if (_impl->heightMap != nullptr &&
+        (static_cast<int>(_impl->heightMap->width()) != width || static_cast<int>(_impl->heightMap->height()) != height))
+    {
+        _impl->heightMap->release(); // command buffers retain what their draws reference
+        _impl->heightMap = nullptr;
+    }
+    if (_impl->heightMap == nullptr)
+    {
+        MTL::TextureDescriptor* desc = MTL::TextureDescriptor::texture2DDescriptor(
+            MTL::PixelFormatR32Float, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height), false);
+        desc->setUsage(MTL::TextureUsageShaderRead);
+        desc->setStorageMode(MTL::StorageModeShared);
+        _impl->heightMap = _impl->device->newTexture(desc);
+        desc->release();
+        if (_impl->heightMap == nullptr)
+            return false;
+    }
+    _impl->heightMap->replaceRegion(
+        MTL::Region::Make2D(0, 0, static_cast<NS::UInteger>(width), static_cast<NS::UInteger>(height)), 0, heights,
+        static_cast<NS::UInteger>(width) * sizeof(float));
+    return true;
+}
+
+void EngineMTLBootstrap::UploadLocalLightTable(const LocalLightTableMTL& table)
+{
+    if (_impl->device == nullptr)
+        return;
+    MTL::Buffer*& buf = _impl->lightTables[_impl->lightTableNext];
+    _impl->lightTableNext = (_impl->lightTableNext + 1) % 3;
+    if (buf == nullptr)
+        buf = _impl->device->newBuffer(sizeof(table), MTL::ResourceStorageModeShared);
+    if (buf == nullptr)
+        return;
+    std::memcpy(buf->contents(), &table, sizeof(table));
+    _impl->lightTableBuffer = buf;
+}
+
+void EngineMTLBootstrap::UploadInstances(const InstanceMTL* instances, int count)
+{
+    _impl->instanceBuffer = nullptr;
+    _impl->instanceCount = 0;
+    if (_impl->device == nullptr || _impl->currentEncoder == nullptr || instances == nullptr || count <= 0)
+        return;
+    if (count > kMaxInstancesMTL)
+        count = kMaxInstancesMTL;
+    const size_t bytes = static_cast<size_t>(count) * sizeof(InstanceMTL);
+    MTL::Buffer* buf = nullptr;
+    size_t offset = 0;
+    if (!_impl->StreamAlloc(bytes, buf, offset))
+        return;
+    std::memcpy(static_cast<uint8_t*>(buf->contents()) + offset, instances, bytes);
+    _impl->instanceBuffer = buf;
+    _impl->instanceOffset = offset;
+    _impl->instanceCount = count;
+}
+
+void EngineMTLBootstrap::EndInstancedRun()
+{
+    _impl->instanceBuffer = nullptr;
+    _impl->instanceCount = 0;
+}
+
+int EngineMTLBootstrap::InstanceCount() const
+{
+    return _impl->instanceCount;
 }
 
 int EngineMTLBootstrap::CreateTexture(int width, int height, const uint8_t* rgba)
@@ -2148,6 +3347,7 @@ void EngineMTLBootstrap::ClearTexturePool()
 
 void EngineMTLBootstrap::Shutdown()
 {
+    _impl->WaitForInFlightCommandBuffers();
     ShutdownDebugOverlayRenderer();
 
     for (MTL::Texture*& tex : _impl->textures)
@@ -2186,6 +3386,54 @@ void EngineMTLBootstrap::Shutdown()
         _impl->queued2DIndexBufferBytes = 0;
         _impl->queued2DIndexBufferUsed = 0;
     }
+    if (_impl->streamBuffer != nullptr)
+    {
+        _impl->streamBuffer->release();
+        _impl->streamBuffer = nullptr;
+        _impl->streamBufferBytes = 0;
+        _impl->streamBufferUsed = 0;
+    }
+    _impl->instanceBuffer = nullptr;
+    _impl->instanceCount = 0;
+    _impl->lightTableBuffer = nullptr;
+    if (_impl->heightMap != nullptr)
+    {
+        _impl->heightMap->release();
+        _impl->heightMap = nullptr;
+    }
+    for (MTL::Texture** tex : {&_impl->shadowCascadeArray, &_impl->shadowFallbackArray, &_impl->shadowProbeTarget})
+    {
+        if (*tex != nullptr)
+        {
+            (*tex)->release();
+            *tex = nullptr;
+        }
+    }
+    for (MTL::RenderPipelineState** ps : {&_impl->shadowDepthPipeline, &_impl->shadowDepthAlphaPipeline})
+    {
+        if (*ps != nullptr)
+        {
+            (*ps)->release();
+            *ps = nullptr;
+        }
+    }
+    if (_impl->shadowDepthState != nullptr)
+    {
+        _impl->shadowDepthState->release();
+        _impl->shadowDepthState = nullptr;
+    }
+    _impl->shadowQueue = Impl::QueuedShadowPass{};
+    _impl->shadowCascadeRendered = false;
+    for (MTL::Buffer** buf :
+         {&_impl->fallbackInstance, &_impl->fallbackLightTable, &_impl->lightTables[0], &_impl->lightTables[1],
+          &_impl->lightTables[2]})
+    {
+        if (*buf != nullptr)
+        {
+            (*buf)->release();
+            *buf = nullptr;
+        }
+    }
     for (std::vector<MTL::Buffer*>& pending : _impl->pending2DBufferRelease)
     {
         for (MTL::Buffer* buf : pending)
@@ -2217,6 +3465,11 @@ void EngineMTLBootstrap::Shutdown()
     {
         _impl->pipelineStateTL->release();
         _impl->pipelineStateTL = nullptr;
+    }
+    if (_impl->pipelineStateTLA2C != nullptr)
+    {
+        _impl->pipelineStateTLA2C->release();
+        _impl->pipelineStateTLA2C = nullptr;
     }
     if (_impl->pipelineStateTLBlend != nullptr)
     {
@@ -2272,6 +3525,17 @@ void EngineMTLBootstrap::Shutdown()
     {
         _impl->depthTexture->release();
         _impl->depthTexture = nullptr;
+    }
+    ReleaseFrameTarget();
+    if (_impl->presentPipeline != nullptr)
+    {
+        _impl->presentPipeline->release();
+        _impl->presentPipeline = nullptr;
+    }
+    if (_impl->presentSampler != nullptr)
+    {
+        _impl->presentSampler->release();
+        _impl->presentSampler = nullptr;
     }
     if (_impl->commandQueue != nullptr)
     {

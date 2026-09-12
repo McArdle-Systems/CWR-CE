@@ -8,6 +8,7 @@
 #include <Poseidon/Dev/Debug/DebugOverlay.hpp>
 #include <Poseidon/Graphics/Shared/WindowPlacement.hpp>
 #include <Poseidon/Graphics/Shared/ScreenshotWriter.hpp>
+#include <Poseidon/Graphics/Shared/PNGWriter.hpp>
 #include <Poseidon/Graphics/Core/TLVertex.hpp>
 #include <Poseidon/Graphics/Core/MatrixConversion.hpp>
 #include <Poseidon/Graphics/Rendering/BuildRenderPassDescriptor.hpp>
@@ -16,6 +17,7 @@
 #include <Poseidon/Graphics/Rendering/Lighting/Lights.hpp>
 #include <Poseidon/World/Scene/Scene.hpp>
 #include <Poseidon/World/Scene/Camera/Camera.hpp>
+#include <PoseidonGL33/GL33LightIndices.hpp>
 #include <PoseidonMTL/TextBankMTL.hpp>
 #include <PoseidonMTL/TextureMTL.hpp>
 #include <PoseidonMTL/VertexBufferMTL.hpp>
@@ -24,18 +26,24 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace Poseidon
 {
 
 namespace
 {
-int GpuHandleOf(Texture* tex)
+bool ReadDisplayMode(const SDL_DisplayMode* mode, int& w, int& h, int& refresh)
 {
-    TextureMTL* mtlTex = dynamic_cast<TextureMTL*>(tex);
-    return mtlTex ? mtlTex->GpuHandle() : 0;
+    if (!mode)
+        return false;
+    w = mode->w;
+    h = mode->h;
+    refresh = (int)(mode->refresh_rate + 0.5f);
+    return true;
 }
 } // namespace
 
@@ -48,6 +56,7 @@ EngineMTL::EngineMTL(int width, int height, bool windowed, int bpp)
     _windowedRestoreH = height;
     _pixelSize = bpp;
     _refreshRate = 60;
+
     const char* readback = std::getenv("TRIDENT_METAL_READBACK");
     _tridentReadback = readback != nullptr && readback[0] != '\0' && std::strcmp(readback, "0") != 0;
 
@@ -207,6 +216,7 @@ void EngineMTL::InitDraw(bool clear, PackedColor color)
         return;
     }
 
+    _bootstrap.SetReadbackFrame(_tridentReadback || _pendingScreenshotPath.GetLength() > 0);
     bool began = _bootstrap.BeginFrame(color.R8() / 255.0f, color.G8() / 255.0f, color.B8() / 255.0f,
                                        color.A8() / 255.0f, clear, /*clearZ=*/true);
     if (!began)
@@ -224,9 +234,12 @@ void EngineMTL::InitDraw(bool clear, PackedColor color)
     // Force PrepareMeshTL to rebuild its cached view/sun/fog constants at
     // least once this frame (camera/sun/fog can change between frames).
     _tlFrameValid = false;
+    UpdateShadowMapLitState();
 
     Engine::InitDraw(clear, color);
     _frameOpen = true;
+    _drawItems.clear();
+    _currentDrawItem = DrawItem{};
 }
 
 void EngineMTL::FinishDraw()
@@ -246,8 +259,11 @@ void EngineMTL::FinishDraw()
     _frameOpen = false;
 }
 
-void EngineMTL::NextFrame()
+void EngineMTL::PresentFrame()
 {
+    if (!_bootstrap.FrameOpen())
+        return;
+
     if (_tridentReadback || _pendingScreenshotPath.GetLength() > 0)
     {
         const RString path = _pendingScreenshotPath;
@@ -270,12 +286,39 @@ void EngineMTL::NextFrame()
     {
         _bootstrap.EndFrame();
     }
+}
+
+void EngineMTL::NextFrame()
+{
+    PresentFrame();
     Engine::NextFrame();
+}
+
+void EngineMTL::FlushPendingScreenshot()
+{
+    if (_pendingScreenshotPath.GetLength() == 0 || _frameOpen)
+        return;
+    if (_bootstrap.FrameOpen())
+    {
+        PresentFrame();
+        return;
+    }
+    // Between frames there is nothing left to read from the GPU; the cached
+    // copy of the last presented frame is what GL33's back buffer holds too.
+    if (!_lastFrameRGB.empty())
+    {
+        ScreenshotWriter::WriteRGB(_pendingScreenshotPath, _lastFrameWidth, _lastFrameHeight, _lastFrameRGB.data());
+        _pendingScreenshotPath = "";
+    }
 }
 
 int EngineMTL::SampleBackBufferNonBlack()
 {
-    if (!_tridentReadback || _lastFrameRGB.empty() || _lastFrameWidth <= 0 || _lastFrameHeight <= 0)
+    if (!_tridentReadback)
+        return -1;
+    if (!_frameOpen)
+        PresentFrame();
+    if (_lastFrameRGB.empty() || _lastFrameWidth <= 0 || _lastFrameHeight <= 0)
         return -1;
 
     int nonBlack = 0;
@@ -296,8 +339,11 @@ int EngineMTL::SampleBackBufferNonBlack()
 
 bool EngineMTL::SamplePixel(int x, int y, uint8_t* outRGB)
 {
-    if (!_tridentReadback || outRGB == nullptr || _lastFrameRGB.empty() || x < 0 || y < 0 || x >= _lastFrameWidth ||
-        y >= _lastFrameHeight)
+    if (!_tridentReadback || outRGB == nullptr)
+        return false;
+    if (!_frameOpen)
+        PresentFrame();
+    if (_lastFrameRGB.empty() || x < 0 || y < 0 || x >= _lastFrameWidth || y >= _lastFrameHeight)
         return false;
 
     const size_t offset = (static_cast<size_t>(y) * static_cast<size_t>(_lastFrameWidth) + static_cast<size_t>(x)) * 3u;
@@ -305,6 +351,61 @@ bool EngineMTL::SamplePixel(int x, int y, uint8_t* outRGB)
     outRGB[1] = _lastFrameRGB[offset + 1];
     outRGB[2] = _lastFrameRGB[offset + 2];
     return true;
+}
+
+void EngineMTL::DrawTestPattern(const char* name)
+{
+    if (!_frameOpen || name == nullptr)
+        return;
+
+    const Rect2DAbs clip(0.0f, 0.0f, static_cast<float>(_w), static_cast<float>(_h));
+    const float w = static_cast<float>(_w);
+    const float h = static_cast<float>(_h);
+    auto drawQuad = [&](float x0, float y0, float x1, float y1, const DWORD(&argb)[4])
+    {
+        const float xy[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
+        const float uv[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        const PackedColor colors[4] = {PackedColor(argb[0]), PackedColor(argb[1]), PackedColor(argb[2]),
+                                       PackedColor(argb[3])};
+        DrawFan2D(xy, nullptr, nullptr, uv, nullptr, colors, 4, 0, 0, clip, render::DepthMode::Disabled,
+                  render::BlendMode::Opaque);
+    };
+    auto clearTo = [&](DWORD argb) { Clear(true, true, PackedColor(argb)); };
+
+    if (std::strcmp(name, "gradient3d") == 0)
+    {
+        drawQuad(0, 0, w, h, {0xFFFF0000, 0xFF00FF00, 0xFFFFFFFF, 0xFF0000FF});
+    }
+    else if (std::strcmp(name, "colorbar") == 0)
+    {
+        const DWORD colors[5] = {0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFFFF00FF};
+        const float barW = w / 5.0f;
+        for (int i = 0; i < 5; i++)
+            drawQuad(barW * i, 0, barW * (i + 1), h, {colors[i], colors[i], colors[i], colors[i]});
+    }
+    else if (std::strcmp(name, "clear_blue") == 0)
+    {
+        clearTo(0xFF0040FF);
+    }
+    else if (std::strcmp(name, "clear_magenta") == 0)
+    {
+        clearTo(0xFFFF00FF);
+    }
+    else if (std::strcmp(name, "quad2d") == 0)
+    {
+        clearTo(0xFF000000);
+        drawQuad(0, 0, w, h, {0xFF000080, 0xFF000080, 0xFF000080, 0xFF000080});
+        const float m = 0.25f;
+        drawQuad(w * m, h * m, w * (1 - m), h * (1 - m), {0xFFCC0000, 0xFFCC0000, 0xFFCC0000, 0xFFCC0000});
+    }
+}
+
+void EngineMTL::SetDebugFlatColor(bool enable)
+{
+    if (_debugFlatColor == enable)
+        return;
+    _debugFlatColor = enable;
+    _tlFrameValid = false;
 }
 
 void EngineMTL::PixelToNDC(float px, float py, float& ndcX, float& ndcY) const
@@ -509,6 +610,8 @@ void EngineMTL::DrawLine(const Line2DAbs& line, PackedColor c0, PackedColor c1, 
 
 void EngineMTL::DrawIndexedFan3D(const VertexIndex* indices, int n)
 {
+    if (_instCount > 1)
+        _instImpure = true; // vertex-soup geometry can't be instanced -- run must fall back
     if (_mesh == nullptr || n < 3 || n > kMaxPolyVerts)
         return;
 
@@ -555,6 +658,7 @@ void EngineMTL::PrepareTriangle(const MipInfo& mip, int specFlags)
     _currentTriDetailMode = 0.0f;
 
     const render::LegacySpec spec = render::SplitLegacy(specFlags);
+    _currentTriSpec = spec;
     render::BuildContext ctx;
     ctx.isIn3DPass = false;
     ctx.isMultitexturing = IsMultitexturing();
@@ -570,7 +674,15 @@ void EngineMTL::PrepareTriangle(const MipInfo& mip, int specFlags)
     // world models, but their source art commonly contains graded alpha used
     // for row tinting/fades.  Reclassifying those pictures as the wheel's
     // near-opaque cutout makes unselected thumbnails black until highlighted.
-    const bool measuredCutout = !_legacyMeshUiOverlay && mip.IsOK() && mip._texture && mip._texture->IsTransparent();
+    // 3D UI overlays (cutObj/RscObject title effects, ControlObject) and
+    // optics models are drawn magnified across the screen; the near-opaque
+    // threshold below would discard everything but the core of their
+    // bilinear-filtered reticle lines and glass vignettes, so they keep
+    // GL33's blend path.
+    const bool screenSpaceOverlay = GetPassKindHint() == render::PassKindHint::ScreenSpace3D ||
+                                    render::Has(spec.material, render::Material::BestMipmap);
+    const bool measuredCutout =
+        !_legacyMeshUiOverlay && !screenSpaceOverlay && mip.IsOK() && mip._texture && mip._texture->IsTransparent();
     if (measuredCutout)
     {
         // Legacy model flags only say "has alpha". The decoded texture class
@@ -653,65 +765,26 @@ void EngineMTL::SetMaterial(const TLMaterial& mat, const LightList& lights, cons
     _tlObject.emissive[2] = mat.emmisive.B();
     _tlObject.emissive[3] = mat.emmisive.A();
 
-    // Local point/spot lights -- ported from GL33's UploadVSLights
-    // (EngineGL33_Shaders.cpp). Night-gated exactly like GL33: local lights
-    // (street lamps, vehicle headlights) only ever illuminate geometry once
-    // the sun's NightEffect kicks in, except DisableSun materials (cockpit
-    // interiors etc.), which the legacy SetupLights forces to full night
-    // regardless of the actual time of day.
+    // Local point/spot lights (street lamps, vehicle headlights): selected
+    // from the frame table by index (GL33's SetLocalLightIndices). The
+    // night gate lives in the raw material colours: they are zero by day
+    // except for DisableSun materials (cockpit interiors), which the legacy
+    // SetupLights forces to full night regardless of the time of day.
     float night = sun->NightEffect();
     if (render::Has(spec.material, render::Material::DisableSun))
         night = 1.0f;
-
-    int n = 0;
-    if (night > 0.0f && GScene->GetCamera() != nullptr)
-    {
-        const Vector3 camPos = GScene->GetCamera()->Position();
-        const Color matDif = mat.diffuse * night;
-        const Color matAmb = mat.ambient * night;
-        for (int i = 0; i < lights.Size() && n < kMaxLocalLightsMTL; i++)
-        {
-            Light* light = lights[i];
-            if (!light)
-                continue;
-            LightDescription desc;
-            light->GetDescription(desc);
-            const bool isSpot = desc.type == LTSpotLight;
-            if (desc.type != LTPoint && !isSpot)
-                continue; // point + spot lights; directional (sun) handled separately
-
-            LightMTL& l = _tlObject.lights[n];
-            // Camera-relative, matching the world matrix's convention (every
-            // other position-like field in ObjectConstantsMTL is already in
-            // this space).
-            l.posAndAtten[0] = static_cast<float>(desc.pos.X() - camPos.X());
-            l.posAndAtten[1] = static_cast<float>(desc.pos.Y() - camPos.Y());
-            l.posAndAtten[2] = static_cast<float>(desc.pos.Z() - camPos.Z());
-            l.posAndAtten[3] = desc.startAtten;
-
-            Vector3 beam = desc.dir;
-            beam.Normalize();
-            l.dirAndIsSpot[0] = static_cast<float>(beam.X());
-            l.dirAndIsSpot[1] = static_cast<float>(beam.Y());
-            l.dirAndIsSpot[2] = static_cast<float>(beam.Z());
-            l.dirAndIsSpot[3] = isSpot ? 1.0f : 0.0f;
-
-            const Color ldif = desc.diffuse * matDif;
-            l.diffuse[0] = ldif.R();
-            l.diffuse[1] = ldif.G();
-            l.diffuse[2] = ldif.B();
-            l.diffuse[3] = 0.0f;
-
-            const Color lamb = desc.ambient * matAmb;
-            l.ambient[0] = lamb.R();
-            l.ambient[1] = lamb.G();
-            l.ambient[2] = lamb.B();
-            l.ambient[3] = 0.0f;
-
-            n++;
-        }
-    }
-    _tlObject.lightCount[0] = static_cast<float>(n);
+    const Color matDif = mat.diffuse * night;
+    const Color matAmb = mat.ambient * night;
+    _tlObject.matDiffuseRaw[0] = matDif.R();
+    _tlObject.matDiffuseRaw[1] = matDif.G();
+    _tlObject.matDiffuseRaw[2] = matDif.B();
+    _tlObject.matDiffuseRaw[3] = 0.0f;
+    _tlObject.matAmbientRaw[0] = matAmb.R();
+    _tlObject.matAmbientRaw[1] = matAmb.G();
+    _tlObject.matAmbientRaw[2] = matAmb.B();
+    _tlObject.matAmbientRaw[3] = 0.0f;
+    const auto packed = PackLightIndices(lights);
+    std::memcpy(_tlObject.lightIdx, packed.data(), sizeof(_tlObject.lightIdx));
 
     // Specular: sun-direction-only (GL33 doesn't apply specular from local
     // lights either) -- EngineGL33::DoSetMaterial's SelectPixelShaderSpecular
@@ -932,7 +1005,7 @@ void EngineMTL::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelT
         _tlFrame.fogParams[0] = fogStart;
         _tlFrame.fogParams[1] = (fogEnd > fogStart) ? 1.0f / (fogEnd - fogStart) : 0.0f;
         _tlFrame.fogParams[2] = 1.0f;
-        _tlFrame.fogParams[3] = 0.0f;
+        _tlFrame.fogParams[3] = _debugFlatColor ? 1.0f : 0.0f;
         _tlFrame.fogColor[0] = _fogColor.R();
         _tlFrame.fogColor[1] = _fogColor.G();
         _tlFrame.fogColor[2] = _fogColor.B();
@@ -950,16 +1023,37 @@ void EngineMTL::PrepareMeshTL(const LightList& /*lights*/, const Matrix4& modelT
     ConvertProjectionMatrix(projection, camera->ProjectionNormal(), CanZBias() ? 0 : _bias);
     std::memcpy(_tlFrame.projection.m, &projection, sizeof(projection));
     _tlFrame.sunDirAndEnabled[3] = _sunEnabled ? 1.0f : 0.0f;
+    std::memcpy(_tlFrame.nightEyeCoef, _nightEyeCoef, sizeof(_nightEyeCoef));
 
     // Per-object: camera-relative world matrix (translation has the camera
     // position subtracted), same as GL33's PrepareMeshTLImpl.
     GfxMatrix world;
     ConvertMatrix(world, modelToWorld);
     const Vector3 camPos = camera->Position();
+    _tlFrame.hmParams[0] = _heightmapValid ? _hmInvGrid : 0.0f;
+    _tlFrame.hmParams[1] = static_cast<float>(camPos.X());
+    _tlFrame.hmParams[2] = static_cast<float>(camPos.Z());
+    _tlFrame.hmParams[3] = static_cast<float>(camPos.Y());
+    _tlFrame.landGrid[0] = _hmInvLandGrid;
+    _tlFrame.landGrid[1] = (_heightmapValid && _hmInvLandGrid > 0) ? _hmInvGrid / _hmInvLandGrid : 0.0f;
     world._41 -= static_cast<float>(camPos.X());
     world._42 -= static_cast<float>(camPos.Y());
     world._43 -= static_cast<float>(camPos.Z());
     std::memcpy(_tlObject.world.m, &world, sizeof(world));
+
+    // IsColored objects carry their opacity + fade in the scene constant
+    // colour (GL33's PrepareMeshTL does the same upload).
+    Color constColor = HWhite;
+    if (render::Has(spec.routing, render::Routing::IsColored))
+        constColor = GScene->GetConstantColor();
+    _tlObject.constColor[0] = constColor.R();
+    _tlObject.constColor[1] = constColor.G();
+    _tlObject.constColor[2] = constColor.B();
+    _tlObject.constColor[3] = constColor.A();
+
+    _currentDrawItem.worldMatrix = world;
+    _currentDrawItem.specFlags = spec;
+    _currentDrawItem.bias = _bias;
 }
 
 void EngineMTL::BeginMeshTL(const Shape& sMesh, int /*spec*/, bool dynamic)
@@ -980,6 +1074,19 @@ void EngineMTL::DrawSectionTL(const Shape& sMesh, int beg, int end)
     _bootstrap.DrawSectionTL(buf->VertexBufferHandle(), buf->IndexBufferHandle(), firstIndex, indexCount,
                              _tlCurrentTexture, _tlSecondaryTexture, _tlObject, _tlFrame, _tlSectionDepthMode,
                              _tlSectionBlendMode, _tlSectionSampler, _tlSectionSurfaceMode, _tlSectionShader);
+
+    DrawItem item = _currentDrawItem;
+    item.isTLDraw = true;
+    item.sectionBegin = beg;
+    item.sectionEnd = end;
+    item.firstIndex = firstIndex;
+    item.indexCount = indexCount;
+    item.vertexBuffer = buf;
+    item.backendMeshHandle = static_cast<std::uint32_t>(buf->VertexBufferHandle());
+    item.backendTextureHandle = static_cast<std::uint32_t>(_tlCurrentTexture);
+    item.backendTexture1Handle = static_cast<std::uint32_t>(_tlSecondaryTexture);
+    item.passId = SpecToPassId(item.specFlags);
+    _drawItems.push_back(item);
 }
 
 void EngineMTL::FlushQueues()
@@ -987,9 +1094,284 @@ void EngineMTL::FlushQueues()
     _bootstrap.FlushTriangles2D();
 }
 
+// Ported from EngineGL33::UploadLocalLights: raw light colours, positions
+// camera-relative to match the world matrices. SetMaterial and
+// InstancedRunAdd select from it by index.
+void EngineMTL::UploadLocalLights(const LightList& aLights)
+{
+    _localLightIndices.clear();
+    LocalLightTableMTL table = {};
+    Vector3 camPos = VZero;
+    if (GScene != nullptr && GScene->GetCamera() != nullptr)
+        camPos = GScene->GetCamera()->Position();
+
+    int n = 0;
+    for (int i = 0; i < aLights.Size() && n < kMaxLightTableMTL; i++)
+    {
+        Light* light = aLights[i];
+        if (!light)
+            continue;
+        LightDescription desc;
+        light->GetDescription(desc);
+        const bool isSpot = desc.type == LTSpotLight;
+        if (desc.type != LTPoint && !isSpot)
+            continue;
+
+        _localLightIndices[light] = n;
+        LightMTL& l = table.lights[n];
+        l.posAndAtten[0] = static_cast<float>(desc.pos.X() - camPos.X());
+        l.posAndAtten[1] = static_cast<float>(desc.pos.Y() - camPos.Y());
+        l.posAndAtten[2] = static_cast<float>(desc.pos.Z() - camPos.Z());
+        l.posAndAtten[3] = desc.startAtten;
+        Vector3 beam = desc.dir;
+        beam.Normalize();
+        l.dirAndIsSpot[0] = static_cast<float>(beam.X());
+        l.dirAndIsSpot[1] = static_cast<float>(beam.Y());
+        l.dirAndIsSpot[2] = static_cast<float>(beam.Z());
+        l.dirAndIsSpot[3] = isSpot ? 1.0f : 0.0f;
+        l.diffuse[0] = desc.diffuse.R();
+        l.diffuse[1] = desc.diffuse.G();
+        l.diffuse[2] = desc.diffuse.B();
+        l.ambient[0] = desc.ambient.R();
+        l.ambient[1] = desc.ambient.G();
+        l.ambient[2] = desc.ambient.B();
+        n++;
+    }
+    table.count[0] = static_cast<float>(n);
+    _bootstrap.UploadLocalLightTable(table);
+}
+
+void EngineMTL::UpdateShadowMapLitState()
+{
+    float ctl[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+    float splits[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float cascadeCtl[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float camFwd[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+    if (_shadowTuning.enabled && _shadowMapActive && _shadowCascades > 0)
+    {
+        ctl[0] = 1.0f;
+        // Full darkness by day, none at night (the scene drives the sun factor).
+        ctl[2] = 1.0f - _shadowSunFactor * (1.0f - _shadowTuning.darkness);
+        ctl[3] = (_shadowMapRes > 0) ? (1.0f / static_cast<float>(_shadowMapRes)) : 0.0f;
+        cascadeCtl[0] = static_cast<float>(_shadowCascades);
+        cascadeCtl[1] = _shadowTuning.fadeRange;
+        cascadeCtl[2] = _shadowTuning.biasBase;
+        cascadeCtl[3] = static_cast<float>(_shadowOmniCount);
+        for (int i = 0; i < _shadowCascades; i++)
+            splits[i] = _shadowSplits[i];
+        camFwd[0] = _shadowCamFwd[0];
+        camFwd[1] = _shadowCamFwd[1];
+        camFwd[2] = _shadowCamFwd[2];
+        std::memcpy(_tlFrame.cascadeVP, _shadowMapVP, sizeof(float) * 16 * static_cast<size_t>(_shadowCascades));
+    }
+    std::memcpy(_tlFrame.shadowCtl, ctl, sizeof(ctl));
+    std::memcpy(_tlFrame.cascadeSplits, splits, sizeof(splits));
+    std::memcpy(_tlFrame.cascadeCtl, cascadeCtl, sizeof(cascadeCtl));
+    std::memcpy(_tlFrame.camFwd, camFwd, sizeof(camFwd));
+}
+
+void EngineMTL::RenderShadowDepthScene(const float* lightVPs, const float* splitViewDist, const float* camFwd3,
+                                       int numCascades, int omniCount, int res, const ShadowCasterSet& casters)
+{
+    if (numCascades > kShadowCascadesMTL)
+        numCascades = kShadowCascadesMTL;
+
+    // Resolve each alpha batch's caster texture (loading its base mip if the
+    // depth pass beat the lit draw to it), as SetTexture does.
+    std::vector<ShadowAlphaBatchMTL> batches;
+    batches.reserve(static_cast<size_t>(casters.alphaBatchCount));
+    for (int b = 0; b < casters.alphaBatchCount; b++)
+    {
+        const ShadowCasterBatch& src = casters.alphaBatches[b];
+        TextureMTL* tex = dynamic_cast<TextureMTL*>(src.texture);
+        if (_textBank && tex)
+            _textBank->UseMipmap(tex, 0, 0);
+        batches.push_back({tex ? tex->GpuHandle() : 0, src.firstVertex, src.vertexCount});
+    }
+
+    const bool queued = numCascades >= 1 &&
+                        _bootstrap.QueueShadowCascades(lightVPs, numCascades, res, casters.solidXYZ,
+                                                       casters.solidVertexCount, casters.alphaXYZUV,
+                                                       casters.alphaVertexCount, batches.data(),
+                                                       static_cast<int>(batches.size()));
+    if (!queued)
+    {
+        _shadowMapActive = false;
+        return;
+    }
+    _shadowMapRes = res;
+    _shadowCascades = numCascades;
+    _shadowOmniCount = (omniCount < 0) ? 0 : (omniCount > numCascades ? numCascades : omniCount);
+    std::memcpy(_shadowMapVP, lightVPs, sizeof(float) * 16 * static_cast<size_t>(numCascades));
+    for (int i = 0; i < numCascades; i++)
+        _shadowSplits[i] = splitViewDist[i];
+    _shadowCamFwd[0] = camFwd3[0];
+    _shadowCamFwd[1] = camFwd3[1];
+    _shadowCamFwd[2] = camFwd3[2];
+    _shadowMapActive = true;
+}
+
+bool EngineMTL::DumpShadowMap(const char* path)
+{
+    if (!path || !_shadowMapActive)
+        return false;
+    std::vector<float> depth;
+    int res = 0;
+    if (!_bootstrap.ReadShadowCascade0(depth, res) || res <= 0)
+        return false;
+    // Same grey mapping as GL33's dump; Metal's rows are already top-down.
+    std::vector<uint8_t> gray(static_cast<size_t>(res) * res);
+    for (size_t i = 0; i < gray.size(); i++)
+    {
+        const float d = depth[i];
+        gray[i] = (d >= 0.999f) ? static_cast<uint8_t>(35) : static_cast<uint8_t>((0.15f + (1.0f - d) * 0.85f) * 255.0f);
+    }
+    return PNGWriter::WritePNG(path, res, res, 1, gray.data());
+}
+
+void EngineMTL::SetTerrainHeightmap(const float* heights, int width, int height, float invGrid, float invLandGrid)
+{
+    if (!_bootstrap.SetTerrainHeightmap(heights, width, height))
+        return;
+    _heightmapValid = true;
+    _hmInvGrid = invGrid;
+    _hmInvLandGrid = invLandGrid;
+}
+
+void EngineMTL::SetLandClipParams(float mode, Vector3Par boundingCenter)
+{
+    _tlObject.landClip[3] = mode;
+    const bool active = mode > 0.5f;
+    _tlObject.landClip[0] = active ? static_cast<float>(boundingCenter.X()) : 0.0f;
+    _tlObject.landClip[1] = active ? static_cast<float>(boundingCenter.Y()) : 0.0f;
+    _tlObject.landClip[2] = active ? static_cast<float>(boundingCenter.Z()) : 0.0f;
+}
+
+std::array<std::uint32_t, 4> EngineMTL::PackLightIndices(const LightList& lights) const
+{
+    int idx[GL33LightIndices::Capacity];
+    int n = 0;
+    for (int i = 0; i < lights.Size() && n < GL33LightIndices::Capacity; i++)
+    {
+        auto it = _localLightIndices.find(lights[i]);
+        if (it != _localLightIndices.end())
+            idx[n++] = it->second;
+    }
+    return GL33LightIndices::Pack(idx, n);
+}
+
+bool EngineMTL::InstancedRunAdd(const Matrix4& modelToWorld, const LightList& lights)
+{
+    if (_instPending >= kMaxInstancesMTL || GScene == nullptr || GScene->GetCamera() == nullptr)
+        return false;
+    InstanceMTL& inst = _instArray[_instPending];
+    GfxMatrix world;
+    ConvertMatrix(world, modelToWorld);
+    const Vector3 camPos = GScene->GetCamera()->Position();
+    world._41 -= static_cast<float>(camPos.X());
+    world._42 -= static_cast<float>(camPos.Y());
+    world._43 -= static_cast<float>(camPos.Z());
+    std::memcpy(inst.world.m, &world, sizeof(world));
+
+    const auto packed = PackLightIndices(lights);
+    std::memcpy(inst.lightIdx, packed.data(), sizeof(inst.lightIdx));
+    ++_instPending;
+    return true;
+}
+
+void EngineMTL::BeginInstancedRunUpload()
+{
+    _bootstrap.UploadInstances(_instArray, _instPending);
+    _instCount = _bootstrap.InstanceCount();
+    // A failed upload draws the head alone; impure makes the scene redraw the tail.
+    _instImpure = _instCount < _instPending;
+}
+
 void EngineMTL::DrawPolygon(const VertexIndex* i, int n)
 {
     DrawIndexedFan3D(i, n);
+
+    DrawItem item = {};
+    item.isTLDraw = false;
+    item.specFlags = _currentTriSpec;
+    item.passId = SpecToPassId(_currentTriSpec);
+    _drawItems.push_back(item);
+}
+
+// Stars and laser-target dots: each screen-space point becomes a 2x2 quad
+// whose corner alphas carry the sub-pixel position, same as GL33's
+// DrawPoints. Points are never fogged (specular 0xff000000 = full vFogTC).
+void EngineMTL::DrawPoints(int beg, int end)
+{
+    if (_mesh == nullptr)
+        return;
+
+    const Rect2DAbs fullScreen(0, 0, static_cast<float>(_w), static_cast<float>(_h));
+    for (int i = beg; i < end; i++)
+    {
+        if (_mesh->Clip(i) & ClipAll)
+            continue;
+        const TLVertex& v = _mesh->GetVertex(i);
+        const PackedColor color = v.color;
+        if (color.A8() < 8)
+            continue;
+
+        const int xI = toIntFloor(v.pos[0]);
+        const int yI = toIntFloor(v.pos[1]);
+        if (xI < 0 || xI + 2 > _w || yI < 0 || yI + 2 > _h)
+            continue;
+        const float xFrac = v.pos[0] - xI;
+        const float yFrac = v.pos[1] - yI;
+        const float a = color.A8();
+        auto fracAlpha = [](float alpha)
+        {
+            int ia = toInt(alpha);
+            saturate(ia, 0, 255);
+            return ia;
+        };
+
+        const float x0 = xI + 0.5f, x1 = xI + 2.5f;
+        const float y0 = yI + 0.5f, y1 = yI + 2.5f;
+        const float xy[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
+        const float z[4] = {v.pos.Z(), v.pos.Z(), v.pos.Z(), v.pos.Z()};
+        const float rhw[4] = {v.rhw, v.rhw, v.rhw, v.rhw};
+        const float uv[8] = {v.t0.u, v.t0.v, v.t0.u, v.t0.v, v.t0.u, v.t0.v, v.t0.u, v.t0.v};
+        const PackedColor colors[4] = {
+            PackedColorRGB(color, fracAlpha((1 - xFrac) * (1 - yFrac) * a)),
+            PackedColorRGB(color, fracAlpha(xFrac * (1 - yFrac) * a)),
+            PackedColorRGB(color, fracAlpha(xFrac * yFrac * a)),
+            PackedColorRGB(color, fracAlpha((1 - xFrac) * yFrac * a)),
+        };
+        const PackedColor noFog(0xff000000);
+        const PackedColor specular[4] = {noFog, noFog, noFog, noFog};
+
+        DrawFan2D(xy, z, rhw, uv, nullptr, colors, 4, _currentTriTexture, _currentTriSecondaryTexture, fullScreen,
+                  _currentTriDepthMode, _currentTriBlendMode, _currentTriSampler, _currentTriSurfaceMode,
+                  _currentTriShader, _currentTriAlphaMode, _currentTriAlphaRef, specular, _currentTriDetailMode);
+    }
+}
+
+void EngineMTL::EnableNightEye(float night)
+{
+    if (std::fabs(_nightEye - night) < 0.01f)
+        return;
+    FlushQueues();
+    _nightEye = night;
+    if (_nightEye > 0.01f)
+    {
+        _nightEyeCoef[0] = 0.2f;
+        _nightEyeCoef[1] = 0.9f;
+        _nightEyeCoef[2] = 0.4f;
+        _nightEyeCoef[3] = 1.0f - _nightEye;
+    }
+    else
+    {
+        _nightEyeCoef[0] = 0.0f;
+        _nightEyeCoef[1] = 0.0f;
+        _nightEyeCoef[2] = 0.0f;
+        _nightEyeCoef[3] = 1.0f;
+    }
+    _bootstrap.SetNightEyeCoef(_nightEyeCoef);
 }
 
 void EngineMTL::DrawSection(const FaceArray& face, Offset beg, Offset end)
@@ -1076,8 +1458,15 @@ bool EngineMTL::SetWindowMode(WindowMode mode)
     SDL_SetWindowBordered(_sdlWindow, mode == WindowMode::Windowed);
     _windowed = (mode == WindowMode::Windowed);
 
-    if (mode == WindowMode::Windowed && _windowedRestoreW > 0)
-        SDL_SetWindowSize(_sdlWindow, _windowedRestoreW, _windowedRestoreH);
+    if (mode == WindowMode::Windowed)
+    {
+        // A window created fullscreen/borderless never had SDL_WINDOW_RESIZABLE,
+        // and SDL_SetWindowBordered does not add it.
+        SDL_SetWindowResizable(_sdlWindow, true);
+        if (_windowedRestoreW > 0)
+            SDL_SetWindowSize(_sdlWindow, _windowedRestoreW, _windowedRestoreH);
+        SDL_SetWindowPosition(_sdlWindow, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
 
     int cw = 0, ch = 0;
     SDL_GetWindowSizeInPixels(_sdlWindow, &cw, &ch);
@@ -1135,6 +1524,106 @@ RString EngineMTL::GetDebugName() const
 RString EngineMTL::GetRendererName() const
 {
     return "Metal";
+}
+
+WindowMode EngineMTL::GetCurrentWindowMode() const
+{
+    if (!_sdlWindow)
+        return WindowMode::Windowed;
+    return _windowMode;
+}
+
+void EngineMTL::ListMonitors(FindArray<MonitorInfo>& ret)
+{
+    ret.Clear();
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    if (!displays)
+        return;
+    for (int i = 0; i < count; ++i)
+    {
+        const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(displays[i]);
+        const char* name = SDL_GetDisplayName(displays[i]);
+        MonitorInfo info;
+        info.index = i;
+        info.name = name ? name : "Unknown";
+        info.w = mode ? mode->w : 0;
+        info.h = mode ? mode->h : 0;
+        info.refresh = mode ? (int)(mode->refresh_rate + 0.5f) : 0;
+        ret.Add(info);
+    }
+    SDL_free(displays);
+}
+
+int EngineMTL::GetCurrentMonitor() const
+{
+    if (!_sdlWindow)
+        return 0;
+    SDL_DisplayID id = SDL_GetDisplayForWindow(_sdlWindow);
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    int idx = 0;
+    if (displays)
+    {
+        for (int i = 0; i < count; ++i)
+            if (displays[i] == id)
+            {
+                idx = i;
+                break;
+            }
+        SDL_free(displays);
+    }
+    return idx;
+}
+
+bool EngineMTL::SwitchMonitor(int idx)
+{
+    if (!_sdlWindow)
+        return false;
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    if (!displays || idx < 0 || idx >= count)
+    {
+        SDL_free(displays);
+        return false;
+    }
+    SDL_DisplayID target = displays[idx];
+    SDL_free(displays);
+    SDL_Rect bounds;
+    if (!SDL_GetDisplayBounds(target, &bounds))
+        return false;
+    int windowW = _w;
+    int windowH = _h;
+    SDL_GetWindowSize(_sdlWindow, &windowW, &windowH);
+    SDL_SetWindowPosition(_sdlWindow, bounds.x + (bounds.w - windowW) / 2, bounds.y + (bounds.h - windowH) / 2);
+    return true;
+}
+
+bool EngineMTL::GetDesktopDisplayMode(int& w, int& h, int& refresh) const
+{
+    if (!_sdlWindow)
+        return false;
+    SDL_DisplayID display = SDL_GetDisplayForWindow(_sdlWindow);
+    if (!display)
+        display = SDL_GetPrimaryDisplay();
+    return ReadDisplayMode(SDL_GetDesktopDisplayMode(display), w, h, refresh);
+}
+
+bool EngineMTL::GetCurrentDisplayMode(int& w, int& h, int& refresh) const
+{
+    if (!_sdlWindow)
+        return false;
+    SDL_DisplayID display = SDL_GetDisplayForWindow(_sdlWindow);
+    if (!display)
+        display = SDL_GetPrimaryDisplay();
+    return ReadDisplayMode(SDL_GetCurrentDisplayMode(display), w, h, refresh);
+}
+
+bool EngineMTL::GetRequestedFullscreenMode(int& w, int& h, int& refresh) const
+{
+    if (!_sdlWindow)
+        return false;
+    return ReadDisplayMode(SDL_GetWindowFullscreenMode(_sdlWindow), w, h, refresh);
 }
 
 void EngineMTL::ListResolutions(FindArray<ResolutionInfo>& ret)
@@ -1196,27 +1685,22 @@ AbstractTextBank* EngineMTL::TextBank()
 
 void EngineMTL::ResetForRemount()
 {
+    FlushQueues();
     if (_textBank)
     {
-        // Drop the detail/specular/grass/water-bump set so the reloaded
-        // CfgDetailTextures rebuilds it, instead of carrying the previous mod's
-        // set over (the bank derives it once and keeps it until the bank dies,
-        // which an in-process remount never does).
+        _textBank->ReleaseAllTextures();
         _textBank->ReleaseDetailTextures();
-
-        // TODO: Metal does not yet drop the *general* texture set here, so a
-        // remount still reuses previously-loaded textures under their old names.
-        // GL33 calls ReleaseAllTextures() at this point; TextBankMTL's version is
-        // not safe to call while anything still holds a strong Ref, because it
-        // also clears _bigSurfaceLRU and the bootstrap's GPU surface pool out
-        // from under still-live TextureMTL objects (see its doc comment: it
-        // assumes a bulk destroy where nothing survives). Textures that outlive a
-        // remount are real -- the globally cached animated water textures are
-        // reached again from Landscape::DrawWater on the very next frame -- and
-        // calling it here is an immediate use-after-free crash. Making it safe
-        // needs live textures to drop and lazily re-upload their GPU surfaces,
-        // which is its own piece of work.
     }
+}
+
+int EngineMTL::GpuHandleOf(Texture* tex)
+{
+    TextureMTL* mtlTex = dynamic_cast<TextureMTL*>(tex);
+    if (mtlTex == nullptr)
+        return 0;
+    if (_textBank)
+        _textBank->EnsureResident(mtlTex);
+    return mtlTex->GpuHandle();
 }
 
 bool EngineMTL::IsResizable() const
