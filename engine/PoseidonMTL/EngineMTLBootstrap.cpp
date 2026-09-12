@@ -703,9 +703,8 @@ fragment float4 fsMeshBlend(VSOutMesh in [[stage_in]], constant FrameConstants& 
     // renderer. Never let their fully transparent texture background write
     // an invisible depth rectangle: this is essential for antialiased
     // cutout-like details such as tent ropes and perforated wreck parts.
-    // The threshold is GL33's alphaRef for blended sections (1/255): a
-    // higher one punches holes in faint glass reflections (the A-10 canopy
-    // showed a pale blotch where its texture alpha dipped below 18/255).
+    // The threshold is GL33's alphaRef for blended sections (1/255); a
+    // higher one punches holes in faint glass reflections.
     // Texture alpha only -- in.color.a (obj.ambient.w) tracks the sun's ambient
     // brightness, not opacity, and would wrongly discard real geometry's depth
     // whenever ambient light is dim (dawn/dusk; see fsMeshOpaque's coverage comment).
