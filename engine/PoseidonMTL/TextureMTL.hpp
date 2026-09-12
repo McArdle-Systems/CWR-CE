@@ -74,13 +74,24 @@ class TextureMTL : public Texture
 {
   public:
     TextureMTL() = default;
-    // Cleans up the LRU link handle (if any) -- CLTLink's own destructor
-    // would auto-unlink it from whatever list it's in if left to run on the
-    // handle itself, but since `_cache` is a separately-allocated object,
-    // it still needs an explicit `delete` here or it leaks (the GPU big
-    // surface itself, if any, is released by EngineMTLBootstrap::Shutdown()
-    // same as every other texture handle -- see TextBankMTL's destructor).
+    // Frees the GPU surfaces through the owning bank (which also keeps its
+    // budget totals honest) and the LRU link handle. A texture whose bank
+    // has already gone leaves its surfaces to EngineMTLBootstrap::Shutdown().
     ~TextureMTL() override;
+
+    // The bank that created this texture, so destruction and reloads can
+    // reach the bootstrap and the budget bookkeeping. Cleared by the bank's
+    // destructor for textures that outlive it.
+    void SetBank(TextBankMTL* bank) { _bank = bank; }
+
+    // Drops every GPU surface and the CPU pixel copy while the object (and
+    // any Ref to it) stays valid; the next use reloads from the current VFS
+    // (TextBankMTL::EnsureResident). This is how a mod remount replaces a
+    // texture's content under an unchanged name, as GL33's
+    // TextureGL33::ReleaseMemory does. Dynamic textures (InitFromRGBA) have
+    // no file to reload from and are left alone.
+    void ReleaseMemory(EngineMTLBootstrap& bootstrap, TextBankMTL& bank);
+    bool NeedsReload() const { return _smallGpuHandle == 0 && !_dynamic; }
 
     // Reads Name() through the VFS (GFileServer, so PBO-packed textures
     // work), decodes via DecodePAABuffer, and uploads via `bootstrap`.
@@ -149,6 +160,7 @@ class TextureMTL : public Texture
 
     int64_t BigSurfaceBytes() const { return _bigSurfaceBytes; }
     bool HasBigSurface() const { return _bigGpuHandle != 0; }
+    int SmallGpuHandle() const { return _smallGpuHandle; }
 
     void SetMaxSize(int maxSize) override { _maxSize = maxSize; }
     int AMaxSize() const override { return _maxSize; }
@@ -208,6 +220,8 @@ class TextureMTL : public Texture
     // (Milestone 2).
     int _smallGpuHandle = 0;
     int _bigGpuHandle = 0;
+    bool _dynamic = false; // InitFromRGBA texture -- never released/reloaded
+    TextBankMTL* _bank = nullptr;
     // Finest original-chain level the current big surface covers; INT_MAX
     // when there is no big surface. Levels are numbered finest-first (0 =
     // top/largest), matching the rest of this class and GL33's convention.

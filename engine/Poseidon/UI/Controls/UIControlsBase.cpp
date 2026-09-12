@@ -456,7 +456,10 @@ void ControlObject::OnDraw(float alpha)
     // Force SW T&L path for UI 3D objects — HW-TL shader doesn't support
     // the per-object point light that ControlsContainer::OnDraw creates,
     // and UI objects may gain VBOs during mission OptimizeAll().
+    const render::PassKindHint savedHint = GEngine->GetPassKindHint();
+    GEngine->SetPassKindHint(render::PassKindHint::ScreenSpace3D);
     Draw(level, ClipAll | ClipUser0, *this);
+    GEngine->SetPassKindHint(savedHint);
 }
 
 ControlObjectWithZoom::ControlObjectWithZoom(ControlsContainer* parent, int idc, const ParamEntry& cls)

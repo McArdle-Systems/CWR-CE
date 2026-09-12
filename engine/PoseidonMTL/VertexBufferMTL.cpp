@@ -26,11 +26,15 @@ void VertexBufferMTL::CopyVertices(const Shape& src)
         return;
 
     std::vector<VertexMeshMTL> verts(static_cast<size_t>(_vertexCount));
+    // ApplyLandClip clears the ClipLandKeep bit as it conforms, so read the
+    // saved original flags when a shape has been animated (GL33 does the same).
+    const bool useOrig = src.OriginalPosValid();
     for (int i = 0; i < _vertexCount; i++)
     {
         Vector3Val pos = src.Pos(i);
         Vector3Val norm = src.Norm(i);
         const UVPair& uv = src.UV(i);
+        const ClipFlags clip = useOrig ? src.OrigClip(i) : src.Clip(i);
         VertexMeshMTL& v = verts[static_cast<size_t>(i)];
         v.px = static_cast<float>(pos.X());
         v.py = static_cast<float>(pos.Y());
@@ -42,6 +46,8 @@ void VertexBufferMTL::CopyVertices(const Shape& src)
         v.nz = static_cast<float>(-norm.Z());
         v.u = uv.u;
         v.v = uv.v;
+        v.landClip = (clip & ClipLandKeep) ? 1u : (clip & ClipLandOn) ? 2u : 0u;
+        v.pad = 0;
     }
 
     const size_t byteSize = verts.size() * sizeof(VertexMeshMTL);

@@ -47,20 +47,23 @@ class TextBankMTL : public AbstractTextBank
     Texture* CreateDynamic(int w, int h, const void* rgba, uint32_t size, bool mipmap = false) override;
     void UpdateDynamic(Texture* texture, const void* rgba, uint32_t size) override;
 
-    void Compact() override {}
+    void Compact() override { _texture.Compact(); }
     void Preload() override {}
-    void FlushTextures() override {}
-    void FlushBank(QFBank* /*bank*/) override {}
-    // Wipes every texture at once (level unload etc.) -- the budget total
-    // and LRU list would otherwise go stale (individual TextureMTL
-    // destruction doesn't notify the bank, since that would need a back-
-    // pointer on every texture for a case that's otherwise vanishingly
-    // rare -- textures live for the whole session normally). This is the
-    // one realistic bulk-destroy path, so reset the bookkeeping here
-    // explicitly instead.
-    // Implemented in the .cpp -- needs EngineMTLBootstrap::ClearTexturePool,
-    // and _bootstrap is only forward-declared here.
+    void FlushTextures() override { Compact(); }
+    // Forgets the textures that live in `bank` (a mod being unloaded) so a
+    // later Load under the same name decodes the replacement; live Refs to
+    // the old objects keep them until they are dropped.
+    void FlushBank(QFBank* bank) override;
+    // Drops every texture's GPU surfaces and pixel copy in place (mod
+    // remount, level unload); the objects and the Refs to them stay valid
+    // and reload from the current VFS on next use. Mirrors GL33's
+    // TextBankGL33::ReleaseAllTextures.
     void ReleaseAllTextures() override;
+    // Reloads a released texture (see TextureMTL::ReleaseMemory) before it
+    // is drawn. Called on every handle lookup.
+    void EnsureResident(TextureMTL* texture);
+    // ~TextureMTL: frees the texture's surfaces and settles the budget.
+    void OnTextureDestroyed(TextureMTL& texture);
     void FinishFrame() override;
 
     int NTextures() const override { return _texture.Size(); }

@@ -35,15 +35,20 @@ struct Vertex2DMTL
     float u1, v1, pad0, pad1;
 };
 
-// 3D mesh vertex for the hardware T&L path -- same 32-byte layout as GL33's
-// SVertex (pos, negated normal, UV), local/object space (GPU does the
+// 3D mesh vertex for the hardware T&L path -- GL33's SVertex fields (pos,
+// negated normal, UV, land-clip class), local/object space (GPU does the
 // transform, unlike the 2D/legacy-TL paths where the CPU pre-transforms).
+// landClip: 0 rigid, 1 ClipLandKeep, 2 ClipLandOn. Padded to 40 bytes so the
+// MSL struct (float2 uv is 8-byte aligned) has the same stride.
 struct VertexMeshMTL
 {
     float px, py, pz;
     float nx, ny, nz;
     float u, v;
+    uint32_t landClip;
+    uint32_t pad;
 };
+static_assert(sizeof(VertexMeshMTL) == 40, "VertexMeshMTL stride must match MSL VertexMesh");
 
 // Row-major 4x4, same memory layout as Poseidon's GfxMatrix (v' = v * M,
 // translation in row 3 / m[12..15]). Passed to MSL as raw floats and
@@ -63,16 +68,44 @@ struct FrameConstantsMTL
     Mat4RowsMTL view;          // rotation only, translation zeroed (camera-relative)
     Mat4RowsMTL projection;    // camera projection (with z-bias already folded in)
     float sunDirAndEnabled[4]; // xyz = direction, w = 1.0/0.0 enabled
-    float fogParams[4];        // start, invRange, enabled, 0
+    float fogParams[4];        // start, invRange, enabled, debugFlatColor (GL33 parks it in alphaRef.w)
     float fogColor[4];         // rgb, a=1
     // GL33 water constants: xyz = LightSun::SunDirection(), w = animation time.
     // This occupies the formerly-unused GL33 camPos-compatible tail slot.
     float waterSunDirAndTime[4];
+    // GL33's rgbEyeCoef: rgb = luminance weights, a = 1 - nightEye. Day is
+    // {0,0,0,1}, which leaves colour untouched.
+    float nightEyeCoef[4];
+    // GPU land clip (GL33's hmParams0/landGrid): {invGrid, camX, camZ, camY}
+    // -- the absolute camera position lets the VS recover absolute XZ from
+    // the camera-relative world position -- and {invLandGrid, heightmap
+    // texels per land square, 0, 0}.
+    float hmParams[4];
+    float landGrid[4];
+    // Shadow-map lit state (GL33's PSConstants shadowCtl/cascadeVP/cascadeSplits/
+    // cascadeCtl/camFwd): {enable, 0, darkness, texelSize}, per-cascade
+    // column-major light view-projections, per-tier select distance,
+    // {count, fadeRange, biasBase, omniCount}, camera forward.
+    float shadowCtl[4];
+    float cascadeVP[4 * 16];
+    float cascadeSplits[4];
+    float cascadeCtl[4];
+    float camFwd[4];
 };
 
 static_assert(offsetof(FrameConstantsMTL, waterSunDirAndTime) == 176,
               "FrameConstantsMTL water slot offset must match MSL");
-static_assert(sizeof(FrameConstantsMTL) == 192, "FrameConstantsMTL size must match MSL FrameConstants");
+static_assert(sizeof(FrameConstantsMTL) == 560, "FrameConstantsMTL size must match MSL FrameConstants");
+
+// One alpha-tested shadow-caster batch (Engine::ShadowCasterBatch with the
+// texture resolved to a GPU handle).
+struct ShadowAlphaBatchMTL
+{
+    int textureHandle;
+    int firstVertex;
+    int vertexCount;
+};
+constexpr int kShadowCascadesMTL = 4;
 
 // One local point/spot light, matching GL33's per-light VSConstants layout
 // (EngineGL33.hpp's SlotLightPos/Diffuse/Ambient/Dir, EngineGL33_Shaders.cpp's
@@ -84,8 +117,6 @@ struct LightMTL
     float diffuse[4];      // rgb = light diffuse * nightEffect * material diffuse; a unused
     float ambient[4];      // rgb = light ambient * nightEffect * material ambient; a unused
 };
-
-constexpr int kMaxLocalLightsMTL = 8; // matches GL33's VSConst::MaxLocalLights
 
 // Per-object constants for one DrawSectionTL call -- world matrix already
 // camera-relative (translation has the camera position subtracted, matching
@@ -107,18 +138,51 @@ struct ObjectConstantsMTL
     // y = shader mode: 0 normal, 1 detail, 2 grass, 3 water.
     // z/w = the two grass alpha coefficients supplied by SetGrassParams.
     float flags[4];
-    // Local point/spot lights (street lamps, vehicle headlights) -- ported
-    // from GL33's UploadVSLights. Only ever non-empty when the sun's
-    // NightEffect() > 0 or the material carries DisableSun (forced to full
-    // night) -- matches GL33's gate exactly, see EngineMTL::SetMaterial.
-    float lightCount[4]; // x = active count (0..kMaxLocalLightsMTL), rest unused
-    LightMTL lights[kMaxLocalLightsMTL];
+    // Which frame-table local lights (UploadLocalLights) apply to this
+    // object, GL33LightIndices-packed; instanced runs carry the same per
+    // instance. The night gate is folded into matDiffuseRaw/matAmbientRaw.
+    uint32_t lightIdx[4];
     // Specular: sun-direction-only highlight -- GL33 doesn't apply specular
     // from local lights either, only the sun. rgb = sun diffuse * material
     // specular color, w = material specular power. specEnabled.x gates it
     // (mat.specularPower > 0), matching GL33's SelectPixelShaderSpecular split.
     float specular[4];    // rgb + power(w)
     float specEnabled[4]; // x = 1.0/0.0, rest unused
+    // Per-object IsColored tint + opacity (GScene->GetConstantColor()); white
+    // for everything else. Same slot as GL33's PSConstants::SlotConstColor.
+    float constColor[4];
+    // Instanced runs read their world matrix and light selection from the
+    // InstanceMTL array instead of `world`/`lightIdx` above; x = 1.0 when so.
+    float instanced[4];
+    // Raw material diffuse/ambient scaled by the night effect; the shader
+    // multiplies the table's raw light colours by these (GL33's
+    // matDiffuseRaw/matAmbientRaw).
+    float matDiffuseRaw[4];
+    float matAmbientRaw[4];
+    // GL33's hmParams1: {boundingCenter.xyz, land-clip mode} for the next
+    // draw (Engine::SetLandClipParams); mode 0 leaves the vertices alone.
+    float landClip[4];
+};
+
+// One instance of an instanced run: camera-relative world matrix plus the
+// GL33LightIndices packing of which frame-table lights apply to it.
+struct InstanceMTL
+{
+    Mat4RowsMTL world;
+    uint32_t lightIdx[4];
+};
+
+constexpr int kMaxInstancesMTL = 256;    // matches GL33's WorldInstances UBO
+constexpr int kMaxLightTableMTL = 64;    // matches GL33's LocalLights UBO
+
+// The view's active local lights for the frame (EngineMTL::UploadLocalLights),
+// raw light colours, positions camera-relative. Kept across frames: the
+// terrain draws before the scene uploads the new frame's table and reads
+// the previous one, as GL33's UBO does.
+struct LocalLightTableMTL
+{
+    float count[4]; // x = active count
+    LightMTL lights[kMaxLightTableMTL];
 };
 
 // Native Metal device/layer/queue wrapper (macOS / Apple Silicon). Used two
@@ -170,6 +234,37 @@ class EngineMTLBootstrap
     void OnWindowResized(int width, int height);
     int DrawableWidth() const;
     int DrawableHeight() const;
+
+    // True between BeginFrame() and its matching EndFrame().
+    bool FrameOpen() const;
+
+    // Frame-target knobs, GL33's SetMsaaSamples/SetRenderScale/SetGamma. Any
+    // non-default value routes the frame through an offscreen target that a
+    // present pass resolves, scales and gamma-corrects into the drawable;
+    // all three default off, so the plain path renders straight into the
+    // drawable as before. Applied at the next frame's first BeginFrame.
+    void SetMsaaSamples(int samples); // 0/2/4/8, clamped to what the device supports
+    int MsaaSamples() const;
+    void SetRenderScale(float scale); // 1..2
+    float RenderScale() const;
+    void SetGamma(float gamma);
+    void SetAlphaToCoverage(bool enabled); // cutout coverage through the MSAA resolve; no-op without MSAA
+    // Frames that will be read back present without gamma: GL33's capture
+    // re-resolves the frame target over its gamma pass, so its screenshots
+    // and Trident samples are pre-gamma, and the tests are tuned to that.
+    void SetReadbackFrame(bool readback);
+    bool SetVSync(bool enabled);
+    bool VSync() const;
+
+    // Night-eye desaturation for the 2D/legacy path (the TL path carries it
+    // in FrameConstantsMTL::nightEyeCoef). Splits the 2D batch on change.
+    void SetNightEyeCoef(const float coef[4]);
+
+    // Command buffers that complete with an error, counted since startup,
+    // and the most recent error's description. The GL33 analogue is its
+    // KHR_debug error tally, which Trident diffs across a test.
+    unsigned DebugErrorCount() const;
+    std::string LastDebugMessage() const;
 
     void Shutdown();
 
@@ -421,13 +516,50 @@ class EngineMTLBootstrap
                        Poseidon::render::SamplerMode sampler, Poseidon::render::SurfaceMode surface,
                        Poseidon::render::ShaderFamily shader);
 
+    // Instanced runs (Engine::InstancedRunAdd/BeginInstancedRunUpload): the
+    // instance array lives in a per-frame stream buffer, valid until
+    // EndFrame. While `count` > 1 every DrawSectionTL draws that many
+    // instances; EndInstancedRun() drops back to scalar draws.
+    // Shadow-map depth pass. QueueShadowCascades copies the casters into the
+    // frame stream and EndFrame renders them from each light view-projection
+    // into one slice of the cascade depth array, after the main pass; the
+    // lit shaders sample that array the next frame (GL33 has the same
+    // one-frame latency). Solid casters store their back faces, alpha
+    // batches discard on texture alpha with no culling.
+    bool QueueShadowCascades(const float* lightVPs, int numCascades, int res, const float* solidXYZ,
+                             int solidVertexCount, const float* alphaXYZUV, int alphaVertexCount,
+                             const ShadowAlphaBatchMTL* batches, int batchCount);
+    // Synchronous single-map render + readback (row 0 = bottom, like GL's
+    // glReadPixels) for the triShadowDepthProbe oracle cross-check.
+    bool ShadowDepthProbe(const float* lightVP16, const float* triXYZ, int vertCount, int res, float* outDepth);
+    // Reads slice 0 of the last rendered cascade array, top-down. Waits for the GPU.
+    bool ReadShadowCascade0(std::vector<float>& outDepth, int& outRes);
+
+    // Terrain height grid as an R32 texture the mesh vertex stage samples for
+    // land clipping; the frame's hmParams/landGrid carry the grid scales.
+    bool SetTerrainHeightmap(const float* heights, int width, int height);
+    void UploadLocalLightTable(const LocalLightTableMTL& table);
+    void UploadInstances(const InstanceMTL* instances, int count);
+    void EndInstancedRun();
+    int InstanceCount() const;
+
   private:
     bool SetupDevice(); // shared by Init() and AttachToWindow()
     void ApplyDrawableSize(int fallbackWidth, int fallbackHeight, const char* reason);
     void EnsurePipeline();          // lazy: compiles the embedded 2D MSL shader + pipeline state + depth states
     void EnsureTLPipeline();        // lazy: compiles the embedded mesh MSL shader + pipeline state
     void EnsureFallbackResources(); // lazy: 1x1 opaque white texture + sampler
-    void EnsureDepthTarget(int width, int height); // (re)creates the depth texture to match the drawable size
+    void EnsureDepthTarget(int width, int height, int sampleCount); // (re)creates the depth texture to match
+    void ApplyPendingFrameTarget();                                 // first BeginFrame of a frame
+    void EnsureFrameTarget(int width, int height);
+    void ReleaseFrameTarget();
+    void ReleaseRenderPipelines(); // so Ensure*Pipeline rebuild with the new sample count
+    void EnsurePresentPipeline();
+    void EnsureShadowDepthPipelines();
+    bool EnsureShadowCascadeArray(int res, int layers);
+    void EncodeQueuedShadowCascades(); // EndFrame, after the main encoders
+    bool OffscreenActive() const;
+    void ResolveToDrawable(); // ends the frame-target encoder, opens the present pass on the drawable
 
     struct Impl;
     Impl* _impl = nullptr;

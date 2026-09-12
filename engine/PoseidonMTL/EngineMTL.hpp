@@ -5,9 +5,14 @@
 #include <PoseidonGL33/SDLEventWindow.hpp>
 #include <PoseidonMTL/EngineMTLBootstrap.hpp>
 
+#include <array>
+#include <cstdint>
+#include <unordered_map>
+
 namespace Poseidon
 {
 
+class Light;
 class TextBankMTL;
 class VertexBufferMTL;
 
@@ -104,12 +109,53 @@ class EngineMTL : public Engine
 
     void ListResolutions(FindArray<ResolutionInfo>& ret) override;
     void ListRefreshRates(FindArray<int>& ret) override;
+    WindowMode GetCurrentWindowMode() const override;
+    void ListMonitors(FindArray<MonitorInfo>& ret) override;
+    int GetCurrentMonitor() const override;
+    bool SwitchMonitor(int idx) override;
+    bool GetDesktopDisplayMode(int& w, int& h, int& refresh) const override;
+    bool GetCurrentDisplayMode(int& w, int& h, int& refresh) const override;
+    bool GetRequestedFullscreenMode(int& w, int& h, int& refresh) const override;
+    bool IsAbleToDraw() override { return _sdlWindow != nullptr; }
 
-    void SetGamma(float g) override { _gamma = g; }
+    void SetGamma(float g) override
+    {
+        _gamma = g;
+        _bootstrap.SetGamma(g);
+    }
     float GetGamma() const override { return _gamma; }
+    // -1 (adaptive) has no Metal equivalent; treat it as on.
+    bool SetSwapInterval(int interval) override { return _bootstrap.SetVSync(interval != 0); }
+    int GetSwapInterval() const override { return _bootstrap.VSync() ? 1 : 0; }
+    void SetMsaaSamples(int samples) override { _bootstrap.SetMsaaSamples(samples); }
+    int GetMsaaSamples() const override { return _bootstrap.MsaaSamples(); }
+    void SetRenderScale(float scale) override { _bootstrap.SetRenderScale(scale); }
+    float GetRenderScale() const override { return _bootstrap.RenderScale(); }
+    void SetAlphaToCoverage(bool enable) override
+    {
+        _alphaToCoverage = enable;
+        _bootstrap.SetAlphaToCoverage(enable);
+    }
+    bool GetAlphaToCoverage() const override { return _alphaToCoverage && _bootstrap.MsaaSamples() > 1; }
 
     void PrepareTriangle(const MipInfo& mip, int specFlags) override;
     void DrawPolygon(const VertexIndex* i, int n) override;
+    void DrawPoints(int beg, int end) override;
+    void EnableNightEye(float night) override;
+    // TL draws are immediate and PrepareMeshTL rebuilds the projection from
+    // the camera on every call, so a clip-range change only needs the
+    // queued 2D work committed first (GL33's load-bearing step too).
+    void UpdateProjection() override { FlushQueues(); }
+    // The 2D batch always draws in submission order (GL33's reorder-off
+    // behaviour), so only the flush at the reorder boundary carries over.
+    void EnableReorderQueues(bool enable) override
+    {
+        if (_reorderQueues == enable)
+            return;
+        _reorderQueues = enable;
+        if (!enable)
+            FlushQueues();
+    }
     void DrawSection(const FaceArray& face, Offset beg, Offset end) override;
     void DrawDecal(Vector3Par pos, float rhw, float sizeX, float sizeY, PackedColor col, const MipInfo& mip,
                    int specFlags) override;
@@ -158,6 +204,50 @@ class EngineMTL : public Engine
     void DrawSectionTL(const Shape& sMesh, int beg, int end) override;
     void FlushQueues() override;
 
+    // Instanced runs -- GL33's design (EngineGL33_Mesh.cpp): the scene
+    // accumulates a sorted run of identical static shapes, the head draws
+    // once and every DrawSectionTL inside the run renders all K instances.
+    // Legacy (vertex-soup) emission inside the run marks it impure so the
+    // scene redraws the tail scalar. Lights come from the frame table
+    // UploadLocalLights builds, selected per instance by index.
+    void UploadLocalLights(const LightList& aLights) override;
+    void InstancedRunReset() override { _instPending = 0; }
+    bool InstancedRunAdd(const Matrix4& modelToWorld, const LightList& lights) override;
+    void BeginInstancedRunUpload() override;
+    bool EndInstancedRun() override
+    {
+        const bool pure = !_instImpure;
+        _instCount = 0;
+        _bootstrap.EndInstancedRun();
+        return pure;
+    }
+    bool InstancedRunActive() const override { return _instCount > 1; }
+
+    // Shadow maps (opt-in, dev overlay / tri verbs): the scene's cascade
+    // depth pass is queued and rendered at the end of the frame; the lit
+    // shaders sample the previous frame's map, the same latency GL33 has.
+    void SetShadowMapsEnabled(bool enabled) override { _shadowTuning.enabled = enabled; }
+    bool ShadowMapsEnabled() const override { return _shadowTuning.enabled; }
+    ShadowMapTuning GetShadowMapTuning() const override { return _shadowTuning; }
+    void SetShadowMapTuning(const ShadowMapTuning& tuning) override { _shadowTuning = tuning; }
+    void SetShadowMapSunFactor(float f) override { _shadowSunFactor = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f); }
+    void RenderShadowDepthScene(const float* lightVPs, const float* splitViewDist, const float* camFwd3,
+                                int numCascades, int omniCount, int res, const ShadowCasterSet& casters) override;
+    bool ShadowDepthProbe(const float* lightVP16, const float* triXYZ, int vertCount, int res,
+                          float* outDepth) override
+    {
+        return _bootstrap.ShadowDepthProbe(lightVP16, triXYZ, vertCount, res, outDepth);
+    }
+    bool DumpShadowMap(const char* path) override;
+
+    // GPU land clip -- GL33's design: the terrain height grid lives in a
+    // vertex-stage texture and vsMesh snaps ClipLandKeep/ClipLandOn vertices
+    // to it, so the CPU deform is skipped (Object::SkipCpuLandClip) and
+    // land-clipped shapes can instance.
+    void SetTerrainHeightmap(const float* heights, int width, int height, float invGrid, float invLandGrid) override;
+    bool LandClipInVS() const override { return _heightmapValid; }
+    void SetLandClipParams(float mode, Vector3Par boundingCenter) override;
+
     // No BeginShadowPass/EndShadowPass override: GL33's versions only flush
     // its batched-draw queue (EngineGL33_Draw.cpp). Metal's queued 2D draws
     // are drained by FlushQueues()/state-changing draw boundaries.
@@ -167,13 +257,25 @@ class EngineMTL : public Engine
 
     AbstractTextBank* TextBank() override;
     void TextureDestroyed(Texture* /*tex*/) override {}
-    // Mirrors EngineGL33::ResetForRemount: drop the GPU textures tied to the
-    // old mod set so the new set reloads on demand. No GL33-style bind/
-    // pipeline-cache invalidation needed -- Metal has no equivalent global
-    // cache, and the caller (GameApplication::ReloadGameContent*) already
-    // clears m_canRender before this runs, so there's no in-flight queued
-    // draw that could reference a texture this releases.
+    // Mirrors EngineGL33::ResetForRemount: a remount only changes content,
+    // so the GPU textures tied to the old mod set go and the new set's
+    // reload on demand -- textures that outlive the remount (the cached
+    // animated water set) reload in place, and the detail set is rebuilt
+    // from the reloaded CfgDetailTextures. No GL33-style bind/pipeline-
+    // cache invalidation needed -- Metal has no equivalent global cache.
     void ResetForRemount() override;
+
+    // Same guard band as GL33: Metal clips in NDC too, so a modest overflow
+    // past the viewport is safe and spares the CPU clipper edge-straddling
+    // geometry.
+    int MinGuardX() const override { return -kGuardBand; }
+    int MaxGuardX() const override { return _w + kGuardBand; }
+    int MinGuardY() const override { return -kGuardBand; }
+    int MaxGuardY() const override { return _h + kGuardBand; }
+    int MinSatX() const override { return MinGuardX(); }
+    int MaxSatX() const override { return MaxGuardX(); }
+    int MinSatY() const override { return MinGuardY(); }
+    int MaxSatY() const override { return MaxGuardY(); }
 
     float ZShadowEpsilon() const override { return 0.01f; }
     float ZRoadEpsilon() const override { return 0.005f; }
@@ -200,17 +302,29 @@ class EngineMTL : public Engine
     int AFrameTime() const override;
 
     void Screenshot(RString filename) override { _pendingScreenshotPath = static_cast<const char*>(filename); }
-    void FlushPendingScreenshot() override {}
+    void FlushPendingScreenshot() override;
     int SampleBackBufferNonBlack() override;
     bool SamplePixel(int x, int y, uint8_t* outRGB) override;
+    void DrawTestPattern(const char* name) override;
+    void SetDebugFlatColor(bool enable) override;
+    bool GetDebugFlatColor() const override { return _debugFlatColor; }
+    unsigned int GetDebugErrorCount() const override { return _bootstrap.DebugErrorCount(); }
+    std::string GetLastDebugMessage() const override { return _bootstrap.LastDebugMessage(); }
+    const std::vector<DrawItem>* GetRecordedDraws() const override { return &_drawItems; }
 
   private:
+    static constexpr int kGuardBand = 1024 * 4;
+
     int _w = 0, _h = 0; // backbuffer dimensions (pixels)
     int _pixelSize;
     int _refreshRate;
     bool _windowed;
     int _bias = 0;
     float _gamma = 1.0f;
+    bool _alphaToCoverage = true;
+    float _nightEye = 0.0f;
+    bool _reorderQueues = false;
+    float _nightEyeCoef[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     WindowMode _windowMode = WindowMode::Borderless;
     int _windowedRestoreW = 0, _windowedRestoreH = 0;
 
@@ -226,8 +340,23 @@ class EngineMTL : public Engine
     std::vector<uint8_t> _lastFrameRGB;
     int _lastFrameWidth = 0;
     int _lastFrameHeight = 0;
+    bool _debugFlatColor = false;
+
+    // Per-frame draw recording for the frame validator (SceneExtractor);
+    // same shape GL33 records. Cleared in InitDraw.
+    std::vector<DrawItem> _drawItems;
+    DrawItem _currentDrawItem;
+    render::LegacySpec _currentTriSpec;
+
+    // Presents the bootstrap frame (with readback when enabled). NextFrame's
+    // normal path; the Trident samplers also call it so a frame that has
+    // been FinishDraw'n but not yet presented is what gets sampled, matching
+    // GL33's read-before-swap semantics.
+    void PresentFrame();
 
     TextBankMTL* _textBank = nullptr;
+    // GPU handle for a draw, reloading a released texture first.
+    int GpuHandleOf(Texture* tex);
 
     // 3D mesh path: the TLVertexTable bound by BeginMesh (cleared by EndMesh)
     // and the texture handle PrepareTriangle most recently set, used by
@@ -302,6 +431,30 @@ class EngineMTL : public Engine
     render::SamplerMode _tlSectionSampler = {render::SamplerFilter::Linear, false, false};
     bool _sunEnabled = false;
     float _grassParams[4] = {};
+
+    ShadowMapTuning _shadowTuning;
+    float _shadowSunFactor = 1.0f;
+    bool _shadowMapActive = false; // a depth pass was queued with the state below
+    int _shadowMapRes = 0;
+    int _shadowCascades = 0;
+    int _shadowOmniCount = 0;
+    float _shadowMapVP[kShadowCascadesMTL * 16] = {};
+    float _shadowSplits[kShadowCascadesMTL] = {};
+    float _shadowCamFwd[3] = {};
+    // Snapshots the shadow-map lit state into _tlFrame at frame start, so a
+    // depth pass queued mid-frame is not paired with the previous map.
+    void UpdateShadowMapLitState();
+
+    bool _heightmapValid = false;
+    float _hmInvGrid = 0.0f;
+    float _hmInvLandGrid = 0.0f;
+    InstanceMTL _instArray[kMaxInstancesMTL] = {};
+    int _instPending = 0;
+    int _instCount = 0;
+    bool _instImpure = false;
+    // Light -> index into this frame's light table, rebuilt by UploadLocalLights.
+    std::unordered_map<const Light*, int> _localLightIndices;
+    std::array<std::uint32_t, 4> PackLightIndices(const LightList& lights) const;
 
     void CreateWindowAndDevice();
 
