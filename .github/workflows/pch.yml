@@ -1,8 +1,7 @@
 name: C++ / PCH
 
+# Upstream runs this audit weekly; on the fork it is manual only.
 on:
-  schedule:
-    - cron: '0 3 * * 1'
   workflow_dispatch:
 
 permissions:
