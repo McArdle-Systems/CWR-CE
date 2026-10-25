@@ -67,14 +67,14 @@ if(POSEIDON_TARGET_IOS)
     list(APPEND ALL_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/UI/Controls/IosKeyboardAccessory.mm)
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/UI/Controls/IosKeyboardAccessory.mm
-        PROPERTIES SKIP_PRECOMPILE_HEADERS ON
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "-fobjc-arc"
     )
 
     list(FILTER ALL_SOURCES EXCLUDE REGEX "UI/Controls/IosGameDataGateScreen\.cpp$")
     list(APPEND ALL_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/UI/Controls/IosGameDataGateScreen.mm)
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/UI/Controls/IosGameDataGateScreen.mm
-        PROPERTIES SKIP_PRECOMPILE_HEADERS ON
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "-fobjc-arc"
     )
 endif()
 
