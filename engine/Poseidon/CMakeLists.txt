@@ -67,14 +67,14 @@ if(POSEIDON_TARGET_IOS)
     list(APPEND ALL_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/UI/Controls/IosKeyboardAccessory.mm)
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/UI/Controls/IosKeyboardAccessory.mm
-        PROPERTIES SKIP_PRECOMPILE_HEADERS ON
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "-fobjc-arc"
     )
 
     list(FILTER ALL_SOURCES EXCLUDE REGEX "UI/Controls/IosGameDataGateScreen\.cpp$")
     list(APPEND ALL_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/UI/Controls/IosGameDataGateScreen.mm)
     set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/UI/Controls/IosGameDataGateScreen.mm
-        PROPERTIES SKIP_PRECOMPILE_HEADERS ON
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "-fobjc-arc"
     )
 endif()
 
@@ -251,11 +251,9 @@ if(MSVC OR (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_FRONTEN
         $<$<CXX_COMPILER_ID:Clang>:-Wno-error=non-pod-varargs>
         $<$<CXX_COMPILER_ID:Clang>:-Wno-error=c++11-narrowing>
         $<$<CXX_COMPILER_ID:Clang>:-Wno-error=ordered-compare-function-pointers>
-        $<$<CXX_COMPILER_ID:Clang>:-Wno-error>
     )
 else()
     target_compile_options(Poseidon PRIVATE
-        -Wno-error
         -Wno-c++11-narrowing
         -Wno-non-pod-varargs
         -Wno-char-subscripts

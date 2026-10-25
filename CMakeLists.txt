@@ -244,6 +244,12 @@ add_compile_options(
     -Wno-format                           # Format string mismatches (MSVC vs clang differences)
 )
 
+# Whatever the suppressions above do not cover is a defect, on every preset and platform.
+# Bypass a local build with --compile-no-warning-as-error.
+set(CMAKE_COMPILE_WARNING_AS_ERROR ON CACHE BOOL "Treat compiler warnings as errors")
+# Xcode appends -Wshorten-64-to-32 by default, re-enabling what -Wno-conversion suppresses.
+set(CMAKE_XCODE_ATTRIBUTE_GCC_WARN_64_TO_32_BIT_CONVERSION NO)
+
 enable_testing()
 
 # Backend availability — driven by platform, overridable
