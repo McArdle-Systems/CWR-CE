@@ -18,6 +18,7 @@
 #include <Poseidon/World/Terrain/LandscapeShared.hpp>
 
 #include <mutex>
+#include <vector>
 #include <float.h>
 #include <cmath>
 #include <Poseidon/Foundation/Common/FltOpts.hpp>
@@ -36,6 +37,7 @@
 #include <Poseidon/Foundation/Types/LLinks.hpp>
 #include <Poseidon/Foundation/Types/Pointers.hpp>
 #include <Poseidon/Foundation/platform.hpp>
+#include <Poseidon/Graphics/Rendering/Lighting/Material.hpp>
 #include <Random/randomGen.hpp>
 
 // LandCache::Fill generates segments on multiple TaskPool threads. Each segment
@@ -1265,6 +1267,232 @@ GrassMode GrassModes[] = {
 
 const int NGrassModes = sizeof(GrassModes) / sizeof(*GrassModes);
 
+// Toggles between instanced and mesh-based / baked terrain rendering
+bool GGl33TerrainInstanced = true;
+
+static std::vector<Engine::GroundSegment> g_segInstances;
+// Is the current terrain state valid for instanced rendering?
+static bool g_instSetupValid = false;
+
+namespace
+{
+struct VisibleSegment
+{
+    int xBeg, zBeg;
+    Vector3 center;
+    float radius;
+    unsigned lightSet;
+};
+} // namespace
+
+static std::vector<VisibleSegment> g_visibleSegments;
+
+void Landscape::PrepareInstancedTerrain()
+{
+    if (g_instSetupValid)
+    {
+        return;
+    }
+
+    const int subdiv = 1 << (_terrainRangeLog - _landRangeLog);
+    const int nTex = _texture.Size();
+
+    std::vector<Engine::TerrainTexture> textures(nTex);
+    for (int i = 0; i < nTex; i++)
+    {
+        textures[i].texture = _texture[i];
+        textures[i].simple = TextureIsSimple(i);
+    }
+
+    // Apply per-vertex randomized UV jitter to make texture tiling less obvious
+    const size_t jw = static_cast<size_t>(_landRange);
+    std::vector<float> jitter(jw * jw * 2, 0.0f);
+    for (size_t z = 0; z < jw; z++)
+    {
+        for (size_t x = 0; x < jw; x++)
+        {
+            const RandomInfo& r = _random(x, z);
+            jitter[(z * jw + x) * 2 + 0] = static_cast<float>(r.uOff);
+            jitter[(z * jw + x) * 2 + 1] = static_cast<float>(r.vOff);
+        }
+    }
+
+    // Per-cell texture index and water flag. A cell holds water when its lowest terrain point can be
+    // reached by the tide at its highest (min height <= maxTide + maxWave).
+    auto clampT = [this](int v) { return v < 0 ? 0 : (v >= _terrainRange ? _terrainRange - 1 : v); };
+    const int R = _landRange;
+    std::vector<int> cellTex(static_cast<size_t>(R) * R);
+    std::vector<uint8_t> cellWater(static_cast<size_t>(R) * R, 0);
+    for (int lz = 0; lz < R; lz++)
+    {
+        for (int lx = 0; lx < R; lx++)
+        {
+            const size_t i = static_cast<size_t>(lz) * R + lx;
+            cellTex[i] = ClippedTextureIndex(lz, lx);
+            float minH = FLT_MAX;
+            for (int tz = 0; tz <= subdiv; tz++)
+            {
+                for (int tx = 0; tx <= subdiv; tx++)
+                {
+                    minH = std::min(minH, GetData(clampT(lx * subdiv + tx), clampT(lz * subdiv + tz)));
+                }
+            }
+            if (minH <= maxTide + maxWave)
+            {
+                cellWater[i] = 1;
+            }
+        }
+    }
+
+    Engine::TerrainSetup setup;
+    setup.nTextures = nTex;
+    setup.textures = textures.data();
+    setup.subdivCount = subdiv;
+    setup.segmentSize = LandSegmentSize;
+    setup.landGrid = _landGrid;
+    setup.jitter = jitter.data();
+    setup.jitterW = jw;
+    setup.jitterH = jw;
+    setup.cellTexIndex = cellTex.data();
+    setup.cellWater = cellWater.data();
+    setup.cellRange = R;
+    _engine->PrepareTerrain(setup);
+
+    g_instSetupValid = true;
+}
+
+// Gets the material used for instanced terrain rendering.
+// Has to be rebuilt each frame, because Combine reads current eye accommodation.
+static TLMaterial InstancedTerrainMaterial()
+{
+    TLMaterial base;
+    GAnimatorDefault.GetMaterial(base, 0);
+    Ref<TexMaterial> tm = GTexMaterialBank.New("#Terrain");
+    TLMaterial mat = base;
+    if (tm)
+    {
+        tm->Combine(mat, base);
+    }
+    return mat;
+}
+
+static TLMaterial InstancedWaterMaterial()
+{
+    TLMaterial base;
+    GAnimatorWater.GetMaterial(base, 0);
+    Ref<TexMaterial> tm = GTexMaterialBank.New("#Water");
+    TLMaterial mat = base;
+    if (tm)
+    {
+        tm->Combine(mat, base);
+    }
+    return mat;
+}
+
+void Landscape::DrawGroundInstanced(const LandBegEnd& bigRect, Scene& scene)
+{
+    // Ensure terrain setup is up to date before cull + render
+    PrepareInstancedTerrain();
+
+    Camera* cam = scene.GetCamera();
+    const int subdiv = 1 << (_terrainRangeLog - _landRangeLog);
+    const float halfSegment = LandSegmentSize * _landGrid * 0.5f;
+    auto clampT = [this](int v) { return v < 0 ? 0 : (v >= _terrainRange ? _terrainRange - 1 : v); };
+
+    _engine->BeginGround(scene.ActiveLights());
+
+    // 1. Frustum cull 8x8 cell segments
+    g_visibleSegments.clear();
+    for (int x = bigRect.xBeg; x < bigRect.xEnd; x += LandSegmentSize)
+    {
+        for (int z = bigRect.zBeg; z < bigRect.zEnd; z += LandSegmentSize)
+        {
+            // Compute min and max Y for the segment
+            float minY = FLT_MAX, maxY = -FLT_MAX;
+            for (int cz = 0; cz <= LandSegmentSize; cz++)
+            {
+                for (int cx = 0; cx <= LandSegmentSize; cx++)
+                {
+                    float y = GetData(clampT((x + cx) * subdiv), clampT((z + cz) * subdiv));
+                    minY = std::min(minY, y);
+                    maxY = std::max(maxY, y);
+                }
+            }
+
+            // Parts reaching beyond the map are sea only, and their sampled heights are clamped edge values
+            if (x < 0 || z < 0 || x + LandSegmentSize > _landRange || z + LandSegmentSize > _landRange)
+            {
+                minY = std::min(minY, _seaLevelWave);
+                maxY = std::max(maxY, _seaLevelWave);
+            }
+
+            VisibleSegment seg;
+            seg.xBeg = x;
+            seg.zBeg = z;
+            seg.center = Vector3((x + LandSegmentSize * 0.5f) * _landGrid, (minY + maxY) * 0.5f,
+                                 (z + LandSegmentSize * 0.5f) * _landGrid);
+            float halfY = (maxY - minY) * 0.5f;
+            seg.radius = sqrtf(halfSegment * halfSegment * 2.0f + halfY * halfY) + _landGrid;
+
+            if (cam->IsClipped(seg.center, seg.radius, 1))
+            {
+                continue;
+            }
+
+            seg.lightSet = 0;
+            g_visibleSegments.push_back(seg);
+        }
+    }
+
+    // 2. Compute per-segment local lights
+    LightList work(true);
+    for (VisibleSegment& seg : g_visibleSegments)
+    {
+        work.Resize(0);
+        const LightList& lights = scene.SelectLights(seg.center, seg.radius, work);
+        seg.lightSet = _engine->AddTerrainLightSet(lights);
+    }
+
+    // 3. Generate segment instances for rendering
+    g_segInstances.clear();
+    g_segInstances.reserve(g_visibleSegments.size());
+    for (const VisibleSegment& seg : g_visibleSegments)
+    {
+        Engine::GroundSegment s;
+        s.cellX = seg.xBeg;
+        s.cellZ = seg.zBeg;
+        s.lightSet = seg.lightSet;
+        g_segInstances.push_back(s);
+    }
+
+    if (g_segInstances.empty())
+    {
+        return;
+    }
+
+    _engine->DrawTerrain(g_segInstances.data(), g_segInstances.size(), InstancedTerrainMaterial());
+
+    Texture* waterTex = _texture[0];
+    if (!waterTex)
+    {
+        return;
+    }
+
+    float texPhase = fastFmod(Glob.time.toFloat(), 2);
+    if (texPhase > 1.0f)
+    {
+        texPhase = 2 - texPhase;
+    }
+    int n = waterTex->AnimationLength();
+    if (n > 1)
+    {
+        int i = toIntFloor(texPhase * n);
+        saturate(i, 0, n - 1);
+        waterTex = waterTex->GetAnimation(i);
+    }
+    _engine->DrawWater(g_segInstances.data(), g_segInstances.size(), InstancedWaterMaterial(), waterTex, _seaLevelWave);
+}
+
 void Landscape::DrawGround(const LandBegEnd& bigRect, Scene& scene, const GroundLayerInfo& layer)
 {
     auto t0 = TerrainProfile::Now();
@@ -1367,6 +1595,14 @@ void Landscape::DrawGround(const LandBegEnd& bigRect, Scene& scene, const Ground
 
 void Landscape::DrawHorizont(Scene& scene)
 {
+    // Optional, like the other sky slots (see DrawSky's null guards above) --
+    // LOG_WARN("...has no model configured", Landscape.cpp:64) means a
+    // landscape config can omit "horizont", in which case _horizontObject is
+    // never constructed. Every line below depends on it, so a single early
+    // return covers the whole function instead of guarding each use.
+    if (!_horizontObject)
+        return;
+
     GEngine->EnableReorderQueues(false);
     GEngine->FlushQueues();
 
@@ -1509,7 +1745,14 @@ void Landscape::DrawRect(Scene& scene, const LandBegEnd& bigRect)
         GEngine->EnableNightEye(nightEye);
 
         GroundLayerInfo opaqueLayer;
-        DrawGround(bigRect, scene, opaqueLayer);
+        if (GGl33TerrainInstanced && _engine->DrawsInstancedGround())
+        {
+            DrawGroundInstanced(bigRect, scene);
+        }
+        else
+        {
+            DrawGround(bigRect, scene, opaqueLayer);
+        }
     }
 #endif
 
@@ -1527,7 +1770,10 @@ void Landscape::DrawRect(Scene& scene, const LandBegEnd& bigRect)
         if (!ENGINE_CONFIG.noLandscape)
         {
             GEngine->EnableReorderQueues(true);
-            DrawWater(bigRect, scene);
+            if (!GGl33TerrainInstanced || !_engine->DrawsInstancedGround())
+            {
+                DrawWater(bigRect, scene);
+            }
 
             DrawHorizont(scene);
         }
@@ -1639,11 +1885,23 @@ void Landscape::DrawSky(Scene& scene)
     // calculate sun position
     LightSun* sun = scene.MainLight();
     Vector3Val skyPosition = camera.Position();
-    _skyObject->SetPosition(skyPosition + _skyObject->GetShape()->BoundingCenter());
-    _starsObject->SetPosition(skyPosition + _starsObject->GetShape()->BoundingCenter());
-    // rotate stars
-    _starsObject->SetOrientation(sun->StarsOrientation());
+
+    // Each of these is independently optional: LOG_WARN("...has no model
+    // configured", Landscape.cpp:64) already tells us a landscape config can
+    // omit any sky slot, in which case the corresponding object is never
+    // constructed (stays null) -- DrawClouds already guards _cloudObj[i] the
+    // same way (LandscapeRender.cpp:1795), this just extends the same
+    // defensive pattern to sky/stars/sun/moon instead of assuming all four
+    // are always present.
+    if (_skyObject)
+        _skyObject->SetPosition(skyPosition + _skyObject->GetShape()->BoundingCenter());
+    if (_starsObject)
+    {
+        _starsObject->SetPosition(skyPosition + _starsObject->GetShape()->BoundingCenter());
+        _starsObject->SetOrientation(sun->StarsOrientation());
+    }
     const float sunScale = 120.0 / 12000;
+    if (_sunObject)
     {
         Vector3 relPos = sun->SunDirection() * 12000 * sunScale;
         Vector3 sunPosition = camera.Position() - relPos;
@@ -1652,6 +1910,7 @@ void Landscape::DrawSky(Scene& scene)
 
         // LOG_DEBUG(World, "Sun rel pos {:.2f},{:.2f},{:.2f}",relPos[0],relPos[1],relPos[2]);
     }
+    if (_moonObject)
     {
         Point3 moonPosition = camera.Position() - sun->MoonDirection() * 12000 * sunScale;
         _moonObject->SetPosition(moonPosition);
@@ -1673,21 +1932,27 @@ void Landscape::DrawSky(Scene& scene)
     float clipLevel = skyPosition.Y();
     scene.GetCamera()->SetUserClipPars(VUp, -clipLevel);
 
-    _skyObject->Draw(0, ClipAll & ~ClipBack | ClipUser0, *_skyObject);
-    float starsVisibility = (
-        // see TLVertexMesh::DoStarLighting
-        // overcast limitation
-        (1.5 * SkyThrough() - 0.5) *
-        // daytime limitation
-        sun->StarsVisibility());
-    if (starsVisibility >= 0.1)
+    if (_skyObject)
+        _skyObject->Draw(0, ClipAll & ~ClipBack | ClipUser0, *_skyObject);
+    if (_starsObject)
     {
-        _starsObject->DrawPoints(0, ClipAll & ~ClipBack | ClipUser0, *_starsObject);
+        float starsVisibility = (
+            // see TLVertexMesh::DoStarLighting
+            // overcast limitation
+            (1.5 * SkyThrough() - 0.5) *
+            // daytime limitation
+            sun->StarsVisibility());
+        if (starsVisibility >= 0.1)
+        {
+            _starsObject->DrawPoints(0, ClipAll & ~ClipBack | ClipUser0, *_starsObject);
+        }
     }
     scene.GetCamera()->CancelUserClip();
 
-    _sunObject->Draw(0, ClipAll & ~ClipBack, *_sunObject);
-    _moonObject->Draw(0, ClipAll & ~ClipBack, *_moonObject);
+    if (_sunObject)
+        _sunObject->Draw(0, ClipAll & ~ClipBack, *_sunObject);
+    if (_moonObject)
+        _moonObject->Draw(0, ClipAll & ~ClipBack, *_moonObject);
 }
 
 // there are three separate clouds levels
@@ -1842,6 +2107,7 @@ void Landscape::FlushHeightmapToRenderer()
     }
     _engine->SetTerrainHeightmap(static_cast<const float*>(_data.RawData()), w, h, _invTerrainGrid, _invLandGrid);
     _heightmapDirty = false;
+    g_instSetupValid = false;
 }
 
 void Landscape::Draw(Scene& scene)

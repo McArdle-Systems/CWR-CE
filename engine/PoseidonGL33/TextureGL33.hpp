@@ -37,6 +37,8 @@ struct TextureDescGL33
 
 Poseidon::PacFormat UploadFormatForTextureGL33(Poseidon::PacFormat format, bool interpolate);
 
+void InitGLPixelFormat(TextureDescGL33& desc, Poseidon::PacFormat format, bool enableDXT);
+
 class SurfaceInfoGL33
 {
   private:
@@ -125,6 +127,8 @@ class TextureGL33 : public Texture
         unsigned int handle = GetBigHandle();
         return handle ? handle : GetSmallHandle();
     }
+
+    bool IsGpuValid() const override { return GetHandle() != 0; }
 
     const SurfaceInfoGL33& GetSurface() const { return _surface.GetTexture() ? _surface : _smallSurface; }
 

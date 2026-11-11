@@ -267,12 +267,14 @@ list(APPEND POSEIDON_TEST_SOURCES
     Graphics/Rendering/test_render_frame_perf_budget.cpp
     Graphics/Rendering/test_render_frame_runtime_checks.cpp
     Graphics/Rendering/test_cloudlet_depth_contract.cpp
+    Graphics/Rendering/test_metal_alpha_depth_contract.cpp
 
     # Rendering tests (batch-07)
     Graphics/Rendering/test_colors_materials.cpp
 
     # World tests (batch-08)
     World/test_terrain.cpp
+    World/test_collision_nonfinite.cpp
     World/test_object_animated_bounds.cpp
     World/test_landscape_object_ids.cpp
     World/test_occlusion_contour.cpp

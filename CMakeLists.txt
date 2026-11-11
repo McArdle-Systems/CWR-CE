@@ -164,6 +164,10 @@ add_compile_options(
     -Wno-format                           # Format string mismatches (MSVC vs clang differences)
 )
 
+# Whatever the suppressions above do not cover is a defect, on every preset and platform.
+# Bypass a local build with --compile-no-warning-as-error.
+set(CMAKE_COMPILE_WARNING_AS_ERROR ON CACHE BOOL "Treat compiler warnings as errors")
+
 enable_testing()
 
 # Backend availability — driven by platform, overridable
@@ -220,6 +224,14 @@ add_subdirectory(engine/Poseidon)
 add_subdirectory(engine/PoseidonGL33)
 add_subdirectory(engine/PoseidonOpenAL)
 add_subdirectory(engine/PoseidonFormats)
+
+if(APPLE)
+    # Native Metal renderer backend for Apple platforms, registered through
+    # GraphicsEngineFactory (see GraphicsBackendMTL.cpp).
+    add_subdirectory(engine/PoseidonMTL)
+    add_subdirectory(apps/tools/MetalSmokeTest)
+endif()
+
 add_subdirectory(tests/unit/engine/Poseidon/Foundation)
 add_subdirectory(apps/tools/Evaluator)
 add_subdirectory(tests/unit/apps/Evaluator)
