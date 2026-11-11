@@ -5,6 +5,7 @@
 #include <Poseidon/IO/FileServer.hpp>
 #include <Poseidon/IO/Streams/QStream.hpp>
 #include <Poseidon/Graphics/Textures/PAADecoder.hpp>
+#include <Poseidon/Foundation/Common/Filenames.hpp>
 #include <Poseidon/Graphics/Textures/LooseTextures.hpp>
 #include <Poseidon/Graphics/Rendering/Font/Pactext.hpp>
 #include <Poseidon/Foundation/Logging/Logging.hpp>
@@ -38,6 +39,16 @@ AlphaStats::Kind ClassifyMetalAlpha(const AlphaStats& decoded)
     if (decoded.pctClear >= 2.0 && decoded.pctPartial < 30.0)
         return AlphaStats::Cutout;
     return decoded.kind;
+}
+
+// No filename component (name ends in a path separator, e.g. an empty
+// optional equipment icon "dtaext\equip\") is "no texture", not an error --
+// same reasoning SelectTextureSourceFactory (Pactext.cpp) uses for GL33.
+// Checked up front so an eagerly-decoding backend like this one doesn't
+// attempt (and warn about) a load that was never going to succeed.
+bool HasFilenameComponent(RStringB name)
+{
+    return GetFilenameExt(static_cast<const char*>(name))[0] != '\0';
 }
 
 // A loose (non-PAA/PAC) sibling -- PNG/TGA/JPEG/BMP -- decoded via the same
@@ -195,6 +206,9 @@ void TextureMTL::ReleaseMemory(EngineMTLBootstrap& bootstrap, TextBankMTL& bank)
 
 bool TextureMTL::LoadPixels(EngineMTLBootstrap& bootstrap)
 {
+    if (!HasFilenameComponent(Name()))
+        return false;
+
     DecodedImageChain chain;
     if (!ReadAndDecodeChain(Name(), chain))
     {

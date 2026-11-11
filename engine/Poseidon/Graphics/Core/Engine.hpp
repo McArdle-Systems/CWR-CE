@@ -395,7 +395,7 @@ class Engine : public IGraphicsEngine
     };
 
     // True when the backend implements the instanced ground pass below; the
-    // landscape otherwise keeps the mesh-based ground and water. Default off.
+    // landscape otherwise keeps the mesh-based ground and water.
     virtual bool DrawsInstancedGround() const { return false; }
     virtual void PrepareTerrain(const TerrainSetup& setup) {}
     virtual void DrawTerrain(const GroundSegment* segments, size_t count, const TLMaterial& mat) {}
