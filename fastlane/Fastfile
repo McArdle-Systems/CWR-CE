@@ -52,11 +52,18 @@ platform :ios do
       }
     )
 
-    upload_to_testflight(
-      api_key: api_key,
-      app_identifier: APP_IDENTIFIER,
-      distribute_external: false,
-      notify_external_testers: false
-    )
+    begin
+      upload_to_testflight(
+        api_key: api_key,
+        app_identifier: APP_IDENTIFIER,
+        distribute_external: false,
+        notify_external_testers: false
+      )
+    rescue => e
+      # Newer altool logs a failure to create its upload-resume state file even
+      # when the upload itself succeeded, and fastlane treats that line as fatal.
+      raise unless e.message.include?("CDUploaderStateInfoResumeFilePath")
+      UI.important("Ignoring altool's resume-file error; the upload reported success: #{e.message}")
+    end
   end
 end
